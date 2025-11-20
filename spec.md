@@ -10,7 +10,8 @@
 #### 1. 高可用性（HA: High Availability）
 - 複数の入口ノードによる冗長化
 - 1つのノードが停止しても、サービスは継続稼働
-- 自動フェイルオーバー（手動でも可）
+- **自動フェイルオーバー**: DNS自動更新により障害ノードを30秒以内に除外
+- **自動VPS交換**: オプション機能（設定で有効化可能）
 
 #### 2. トンネリング
 - 自宅サーバー（プライベートネットワーク）からVPS経由で公開
@@ -78,9 +79,10 @@
 - Apache-2.0ライセンス
 
 **制限**:
-- ⚠️ 自動フェイルオーバーは手動実装が必要
+- ⚠️ DNS自動フェイルオーバーは自分で実装が必要
+- ⚠️ VPS自動作成・破棄機能は含まれていない
 
-**結論**: 使用可能だが、フェイルオーバーを自作する必要あり
+**結論**: 使用可能だが、DNS統合とVPS管理の自動化を追加実装する必要あり
 
 ---
 
@@ -199,12 +201,18 @@ server {
     ssl_certificate /etc/letsencrypt/live/yourdomain.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/yourdomain.com/privkey.pem;
     
-    # DDoS軽減
+    # DDoS軽減（アプリケーションレイヤー / Layer 7）
+    # ⚠️ 注意: これは小規模〜中規模の攻撃にのみ有効
+    # 大規模ボリューム攻撃（L3/L4 DDoS）はVPS自体が圧倒される可能性あり
     limit_req_zone $binary_remote_addr zone=one:10m rate=10r/s;
     limit_req zone=one burst=20 nodelay;
     
-    # ファイルサイズ制限を大きく
-    client_max_body_size 500M;
+    # ファイルサイズ制限
+    # ⚠️ セキュリティ警告: この値はアプリケーション要件に応じて調整すること
+    # 大きすぎる値はリソース枯渇攻撃に悪用される可能性あり
+    # バックエンドアプリが大きなファイルを効率的に処理できることを確認
+    # 推奨: 必要最小限に設定（例: 動画アップロード必要 → 500M, 一般的なWeb → 10M）
+    client_max_body_size 500M;  # アプリケーション要件に応じて変更
     
     location / {
         proxy_pass http://backend;
@@ -372,10 +380,20 @@ echo "0 3 * * * certbot renew --quiet" | crontab -
 ```
 
 **Cloudflare DNS認証用の設定:**
+
+**⚠️ セキュリティ警告:**
+以下の方法は開発・テスト環境向けです。本番環境では、より安全な資格情報管理を使用してください。
+
 ```ini
 # ~/.secrets/cloudflare.ini
 dns_cloudflare_api_token = YOUR_CLOUDFLARE_API_TOKEN
 ```
+
+**本番環境での推奨方法:**
+- **Kubernetes**: Kubernetes Secrets
+- **Docker**: Docker Secrets / 環境変数（暗号化ストレージから注入）
+- **VPS**: HashiCorp Vault / クラウドプロバイダーのシークレットマネージャー
+- **パーミッション**: ファイル使用時は必ず `chmod 600` で保護
 
 **Nginx設定（VPS側）:**
 ```nginx
@@ -470,17 +488,50 @@ stream {
     upstream backend_ssl {
         server 10.0.0.1:443;
     }
-    
+
     server {
         listen 443;
         proxy_pass backend_ssl;
-        proxy_protocol on;  # オプション
+        proxy_protocol on;  # ✅ 推奨: クライアントIPをバックエンドに伝える場合は必須
     }
 }
 
 server {
     listen 80;
     return 301 https://$host$request_uri;
+}
+```
+
+**⚠️ PROXY Protocol に関する重要な注意:**
+
+**proxy_protocol が必要なケース:**
+- ✅ アクセスログに実際のクライアントIPを記録したい
+- ✅ バックエンドアプリでIP based rate limitingを行う
+- ✅ 地域ベースのアクセス制御を行う
+- ✅ セキュリティ監査・不正アクセス追跡が必要
+
+**proxy_protocol を使わない場合の影響:**
+- ❌ すべてのリクエストがEdge NodeのIPから来ているように見える
+- ❌ 実際のクライアントIPが不明（10.0.0.10等のプライベートIPのみ）
+- ❌ レート制限が全ユーザーに対して一括適用される
+- ❌ 不正アクセスの発信元を特定できない
+
+**自宅サーバー側の対応（PROXY Protocol有効時）:**
+```nginx
+# Nginxの場合
+http {
+    server {
+        listen 80 proxy_protocol;  # proxy_protocol を受け入れる
+
+        # 実際のクライアントIPをログに記録
+        set_real_ip_from 10.0.0.0/24;  # Edge NodeのIPレンジ
+        real_ip_header proxy_protocol;
+
+        location / {
+            # $remote_addr に実際のクライアントIPが入る
+            access_log /var/log/nginx/access.log combined;
+        }
+    }
 }
 ```
 
@@ -530,17 +581,24 @@ done
 
 ---
 
-### オプション4: Cloudflare Origin Certificate（最も簡単）
+### オプション4: Cloudflare Origin Certificate
+
+**⚠️ 重要な制約:**
+- **Cloudflare Proxyモード ON が必須**
+- 本プロジェクトは「Cloudflare Proxy OFF（DNS only）」を前提としているため、**このオプションは推奨されません**
 
 **メリット:**
-- 証明書管理が不要
+- 証明書管理が不要（Cloudflare Proxy ON時）
 - Cloudflare側で自動更新
 - 15年間有効
 
 **デメリット:**
-- Cloudflareに依存
-- Cloudflare以外からのアクセスでは警告
-- プロキシモードOFFでも使用可能
+- ❌ **Cloudflare ProxyをOFFにすると、ブラウザで証明書警告が表示される**
+- ❌ Cloudflare以外からのトラフィックでは証明書が信頼されない
+- ❌ 本プロジェクトの「完全セルフホスト」思想と矛盾
+
+**使用可能なケース:**
+- Cloudflare ProxyをONにする場合のみ（DDoS保護が必要な場合など）
 
 #### 実装方法
 
@@ -573,17 +631,20 @@ chmod 600 /etc/ssl/cloudflare/key.pem
 server {
     listen 443 ssl http2;
     server_name yourdomain.com *.yourdomain.com;
-    
+
     ssl_certificate /etc/ssl/cloudflare/cert.pem;
     ssl_certificate_key /etc/ssl/cloudflare/key.pem;
-    
-    # Cloudflare IPからのみアクセス許可（オプション）
+
+    # ⚠️ 注意: Cloudflare Origin Certificateを使用する場合、
+    # Cloudflare Proxy ON が必須。Proxy OFFでは証明書エラーが発生。
+
+    # Cloudflare IPからのみアクセス許可（Proxy ON時のみ有効）
     # https://www.cloudflare.com/ips/
     allow 173.245.48.0/20;
     allow 103.21.244.0/22;
     # ... その他のCloudflare IP
     deny all;
-    
+
     location / {
         proxy_pass http://10.0.0.1:80;
         # ...
@@ -595,20 +656,41 @@ server {
 
 ## SSL処理の推奨構成
 
-### 小規模・シンプル重視
-**オプション1（VPS側でSSL終端） + Certbot DNS認証**
-- 各VPSで独立して証明書管理
-- VPS追加時は新規取得が必要だが、自動化可能
+### 本プロジェクトの推奨（Cloudflare Proxy OFF前提）
 
-### セキュリティ重視
-**オプション2（自宅サーバーでSSL終端）**
-- エンドツーエンド暗号化
-- VPSは完全にダムプロキシ
+#### 第1推奨: オプション1（VPS側でSSL終端 + Let's Encrypt）
+**推奨理由:**
+- ✅ 完全セルフホスト（Cloudflare Proxy不要）
+- ✅ 各VPSで独立して証明書管理
+- ✅ VPS追加時の自動化が容易
+- ✅ DNS認証でワイルドカード証明書取得可能
 
-### 運用重視
-**オプション4（Cloudflare Origin Certificate）**
-- 証明書管理が最も簡単
-- Cloudflareへの依存は許容範囲内
+**適用シーン:** 小規模〜中規模、運用重視
+
+#### 第2推奨: オプション3（証明書共有）
+**推奨理由:**
+- ✅ 証明書更新が一元化
+- ✅ VPS追加時にrsyncで即座に配布
+- ⚠️ やや複雑だが、大規模運用に向いている
+
+**適用シーン:** 大規模、VPS数が多い場合
+
+#### 第3推奨: オプション2（自宅サーバーでSSL終端）
+**推奨理由:**
+- ✅ エンドツーエンド暗号化（最高のセキュリティ）
+- ✅ VPSは完全にダムプロキシ（証明書管理不要）
+- ⚠️ 二重暗号化によるオーバーヘッド
+
+**適用シーン:** セキュリティ最重視
+
+#### ❌ 非推奨: オプション4（Cloudflare Origin Certificate）
+**理由:**
+- ❌ Cloudflare Proxy ONが必須（本プロジェクトの思想と矛盾）
+- ❌ Proxy OFFでは証明書エラーが発生
+- ❌ 完全セルフホストが不可能
+
+**使用可能なケース:**
+- Cloudflare ProxyをONにする運用方針の場合のみ
 
 ### 自動化スクリプトの例
 
@@ -644,7 +726,12 @@ ansible-playbook -i "$NEW_IP," \
 #     content: |
 #       dns_cloudflare_api_token = {{ cloudflare_api_token }}
 #     dest: /root/.secrets/cloudflare.ini
-#     mode: 0600
+#     mode: 0600  # 必須: ファイルパーミッションを厳密に制限
+#
+# ⚠️ セキュリティノート:
+# - cloudflare_api_token は Ansible Vault で暗号化して保存すること
+# - または、環境変数経由で注入すること
+# - プレーンテキストでバージョン管理に含めないこと
 #
 # - name: Obtain SSL certificate
 #   command: >
@@ -700,6 +787,109 @@ ansible-playbook -i "$NEW_IP," \
 
 ---
 
+## DDoS対策のスコープと限界
+
+### Nginx Rate Limitingが対応できる範囲
+
+**✅ 有効な攻撃タイプ:**
+- **Layer 7（アプリケーション層）攻撃**
+  - HTTP Flood
+  - Slowloris攻撃
+  - 過度なAPIリクエスト
+  - 単一IPからのbrute force
+
+**対応可能な規模:**
+- 小規模〜中規模（数千〜数万 req/s）
+- VPSのネットワーク帯域内の攻撃
+
+### Nginx Rate Limitingが対応できない範囲
+
+**❌ 無効な攻撃タイプ:**
+- **Layer 3/4（ネットワーク/トランスポート層）攻撃**
+  - UDP Flood
+  - SYN Flood
+  - ICMP Flood
+  - NTP/DNS Amplification攻撃
+
+**対応不可能な規模:**
+- 大規模ボリューム攻撃（数十Gbps以上）
+- VPSのネットワーク帯域を超える攻撃
+- 分散型DDoS（数万IPからの同時攻撃）
+
+### 本プロジェクトの防御戦略
+
+#### 第1防御層: VPSプロバイダーの保護
+```
+大多数のVPSプロバイダーは、基本的なL3/L4 DDoS保護を提供
+- 自動的なトラフィックフィルタリング
+- Null Routing（攻撃対象IPを一時的に無効化）
+- ただし、攻撃が大規模な場合、VPSごと切断される可能性あり
+```
+
+#### 第2防御層: Nginx Rate Limiting（本プロジェクト）
+```
+Layer 7の攻撃を軽減
+- HTTPリクエスト数制限
+- 接続数制限
+- 地理的制限（GeoIP）
+```
+
+#### 第3防御層: 使い捨てVPS戦略（本プロジェクトの核心）
+```
+攻撃を受けたVPSを即座に破棄
+→ 攻撃者は新しいIPを探す必要がある
+→ DNS TTL 30秒で迅速な切り替え
+→ 自宅サーバーは完全に保護される
+```
+
+### 大規模DDoS攻撃への対応
+
+本プロジェクトの枠組みでは対応できない規模の攻撃の場合：
+
+**オプション1: Cloudflare Proxy ON（緊急時）**
+```
+一時的にCloudflare ProxyをONにする
+→ Cloudflareの強力なDDoS保護を利用
+→ 攻撃が収まったらProxy OFFに戻す
+→ 本プロジェクトの「防弾ホスト」思想と併用可能
+```
+
+**オプション2: 専門DDoS保護サービス**
+```
+- Cloudflare Enterprise
+- AWS Shield Advanced
+- Akamai Prolexic
+→ コストは高いが、数百Gbps級の攻撃に対応可能
+```
+
+**オプション3: 一時的なサービス停止**
+```
+攻撃が深刻な場合、一時的にDNSを無効化
+→ 攻撃者の興味が他に移るのを待つ
+→ 数時間〜数日後に別IPで復旧
+```
+
+### 推奨事項
+
+**平時の対策:**
+- ✅ Nginx Rate Limiting有効化
+- ✅ 複数リージョンにEdge Nodeを分散
+- ✅ ヘルスチェック自動フェイルオーバー
+- ✅ 攻撃検知アラート設定
+
+**攻撃時の対応:**
+1. 自動DNS除外（30秒以内）
+2. 攻撃されたVPS破棄
+3. 新規VPS作成・DNS追加
+4. 攻撃が大規模な場合、Cloudflare Proxy ON検討
+
+**受け入れるべきリスク:**
+- 本プロジェクトは「完全セルフホスト」を優先
+- 超大規模攻撃（数十Gbps以上）には専門サービスが必要
+- そのような攻撃は稀であり、コストとのバランスを考慮
+
+---
+
 ## まとめ
 
 ### 推奨構成の利点
@@ -711,9 +901,25 @@ ansible-playbook -i "$NEW_IP," \
 - ✅ 低コスト（月$0-15）
 
 ### トレードオフ
-- 自動フェイルオーバーは手動実装が必要
+- **DNS自動フェイルオーバー**: PowerDNS/Cloudflare API連携で実現可能
+- **VPS自動交換**: オプション機能として実装可能（Terraform/Ansible/VPS Provider API）
 - VPS管理の運用コストがかかる
 - 初期セットアップに時間がかかる
+
+### 自動化のレベル
+
+#### 完全自動化（実装済み）
+- ✅ DNS自動フェイルオーバー（ヘルスチェック失敗 → DNS除外）
+- ✅ SSL証明書自動取得・更新（Let's Encrypt）
+- ✅ WireGuard設定自動生成・配布
+
+#### 半自動化（スクリプト実行）
+- ⚠️ VPS自動作成・削除（rotate-vps.sh等のスクリプトを実行）
+- ⚠️ 攻撃検知時のノード交換（手動判断 + スクリプト実行）
+
+#### 将来的な完全自動化（オプション）
+- 🔄 攻撃検知 → VPS自動交換（閾値ベースの自動トリガー）
+- 🔄 コスト最適化（使用率に応じた自動スケーリング）
 
 ### 最終推奨
 **WireGuard + Nginx + DNS管理のシンプルな3層構成**が、現時点で最もバランスの取れた解決策です。

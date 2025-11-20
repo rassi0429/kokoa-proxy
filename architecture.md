@@ -556,6 +556,132 @@ Edge Node・Originのヘルスチェック
 - ICMP (ping)
 - Custom script
 
+---
+
+### ヘルスチェック対象の詳細
+
+#### Edge Node のヘルスチェック
+
+**アクティブチェック（Control Planeから定期実行）:**
+
+1. **HTTPエンドポイントチェック**
+   ```
+   GET https://<edge_node_ip>/health
+   期待結果: 200 OK
+   頻度: 10秒ごと
+   タイムアウト: 5秒
+   ```
+
+2. **WireGuardトンネルチェック**
+   ```
+   Ping 10.0.X.10 (Edge NodeのWireGuard IP)
+   期待結果: ICMP Echo Reply
+   頻度: 10秒ごと
+   タイムアウト: 3秒
+   ```
+
+3. **SSL証明書有効性チェック**
+   ```
+   openssl s_client -connect <edge_node_ip>:443
+   期待結果: 証明書が有効（期限切れでない）
+   頻度: 1日1回
+   ```
+
+4. **バックエンド接続性チェック**
+   ```
+   Edge Node経由でOriginへの接続をテスト
+   GET https://<domain>/health (via Edge)
+   期待結果: 200 OK（Originからの応答）
+   頻度: 30秒ごと
+   ```
+
+**パッシブチェック（Edge Nodeからハートビート）:**
+
+```go
+// Edge Node → Control Plane (5秒ごと)
+type EdgeHeartbeat struct {
+    NodeID           string
+    Status           string  // "healthy", "degraded", "unhealthy"
+    TunnelStatus     string  // "up", "down"
+    ActiveConnections int
+    CPUPercent       float64
+    MemoryPercent    float64
+    TunnelRTT_ms     int     // Originへのping遅延
+    RequestsPerSecond float64
+    ErrorRate        float64 // 5xx errors / total requests
+}
+```
+
+**異常判定基準:**
+
+| 条件 | アクション |
+|------|----------|
+| HTTPエンドポイント 3回連続失敗 | DNS除外 → UNHEALTHY状態 |
+| WireGuardトンネルダウン | 即座にDNS除外 |
+| CPU > 90% が5分継続 | アラート送信（まだDNS除外しない）|
+| ErrorRate > 10% | アラート送信 + 調査 |
+| ハートビート 30秒途絶 | DNS除外 → UNHEALTHY状態 |
+
+---
+
+#### Origin のヘルスチェック
+
+**アクティブチェック（Control Planeから定期実行）:**
+
+1. **WireGuardトンネルチェック**
+   ```
+   Ping 10.0.X.1 (OriginのWireGuard IP)
+   期待結果: ICMP Echo Reply
+   頻度: 10秒ごと
+   ```
+
+2. **アプリケーションヘルスチェック**
+   ```
+   GET http://10.0.X.1:80/health (WireGuard経由)
+   期待結果: 200 OK + 正常なレスポンスボディ
+   頻度: 30秒ごと
+   ```
+
+3. **個別サービスチェック**
+   ```
+   各origin_serviceごとに設定されたヘルスチェック
+   例: GET http://10.0.X.1:8001/api/health
+   頻度: 30秒ごと
+   ```
+
+**パッシブチェック（OriginからハートビートWebSocket）:**
+
+```go
+// Origin → Control Plane (30秒ごと)
+type OriginHeartbeat struct {
+    OriginID     string
+    Status       string  // "healthy", "degraded", "unhealthy"
+    Services     []ServiceStatus
+    CPUPercent   float64
+    MemoryPercent float64
+    DiskPercent  float64
+    EdgeNodesConnected int  // 接続中のEdge Node数
+}
+
+type ServiceStatus struct {
+    Name   string
+    Port   int
+    Status string  // "up", "down"
+}
+```
+
+**異常判定基準:**
+
+| 条件 | アクション |
+|------|----------|
+| WireGuardトンネルダウン | 即座に全Edge Nodeに通知 → 503エラーページ表示 |
+| アプリケーション応答なし（3回連続） | 全Edge Nodeに通知 → 503エラーページ |
+| 個別サービスダウン | そのサービスのみ503エラー、他は正常動作 |
+| ハートビート 60秒途絶 | アラート送信 + 調査 |
+| Disk > 90% | アラート送信（Critical） |
+
+---
+
 **API Interface:**
 
 ```go
@@ -574,11 +700,23 @@ type HealthChecker interface {
 }
 
 type HealthCheckConfig struct {
-    Type      string // "http", "tcp", "icmp"
+    Type      string // "http", "tcp", "icmp", "wireguard", "ssl_cert"
     Interval  int    // 秒
     Timeout   int    // 秒
-    Retries   int
-    Threshold int    // 連続失敗回数
+    Retries   int    // リトライ回数
+    Threshold int    // 連続失敗回数（この回数に達したら異常判定）
+
+    // HTTP/HTTPSチェック用
+    URL            string
+    ExpectedStatus int    // 期待するHTTPステータスコード（デフォルト: 200）
+    ExpectedBody   string // 期待するレスポンスボディ（部分一致）
+
+    // TCPチェック用
+    Host string
+    Port int
+
+    // WireGuardチェック用
+    WireGuardIP string
 }
 ```
 
@@ -1076,6 +1214,296 @@ Control Plane (every 10s)
 
 ---
 
+## VPS自動交換の完全なエンドツーエンドフロー
+
+### シーケンス図（詳細版）
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ Phase 1: 障害検知・DNS除外（自動）                                │
+└─────────────────────────────────────────────────────────────────┘
+
+T+0s    Health Checker → Edge Node 1
+        GET https://203.0.113.10/health
+        → Timeout (5秒)
+
+T+10s   Health Checker → Edge Node 1 (2回目)
+        → Timeout
+
+T+20s   Health Checker → Edge Node 1 (3回目)
+        → Timeout
+        ✗ 3回連続失敗 → 異常判定
+
+T+21s   Health Checker → Control Plane
+        Event: edge_node_unhealthy
+        {
+          "edge_node_id": "edge-1",
+          "failure_count": 3,
+          "last_error": "connection timeout"
+        }
+
+T+22s   Control Plane → DNS Manager Module
+        Action: remove_dns_record
+        {
+          "edge_node_id": "edge-1",
+          "record_id": "abc123"
+        }
+
+T+23s   DNS Manager → Cloudflare API
+        DELETE /zones/{zone}/dns_records/abc123
+        Response: 200 OK
+
+T+24s   Control Plane → Database
+        UPDATE edge_nodes SET status='unhealthy' WHERE id='edge-1'
+
+T+25s   Control Plane → Alert System
+        Send Notification:
+        - Slack: "⚠️ Edge Node 1 (203.0.113.10) removed from DNS"
+        - Email: admin@example.com
+        - WebSocket: Web UI更新
+
+┌─────────────────────────────────────────────────────────────────┐
+│ Phase 2: VPS破棄（手動 or 自動）                                 │
+└─────────────────────────────────────────────────────────────────┘
+
+T+60s   管理者判断 (手動の場合)
+        or
+        Auto-Replace Policy (自動の場合)
+          if config.auto_replace_unhealthy_nodes == true:
+            trigger vps replacement
+
+T+61s   Control Plane API
+        DELETE /api/v1/edge-nodes/edge-1
+
+T+62s   Control Plane → Edge Provisioner Module
+        Action: destroy_instance
+        {
+          "edge_node_id": "edge-1",
+          "provider_instance_id": "droplet-12345"
+        }
+
+T+63s   Edge Provisioner → DigitalOcean API
+        DELETE /v2/droplets/12345
+        Response: 204 No Content
+
+T+64s   Control Plane → Database
+        UPDATE edge_nodes SET status='deleted', deleted_at=NOW()
+        WHERE id='edge-1'
+
+┌─────────────────────────────────────────────────────────────────┐
+│ Phase 3: 新VPS作成（自動）                                       │
+└─────────────────────────────────────────────────────────────────┘
+
+T+65s   Control Plane API (自動 or 手動トリガー)
+        POST /api/v1/edge-nodes
+        {
+          "origin_id": "origin-a",
+          "provider": "vultr",  # プロバイダー変更で攻撃回避
+          "region": "nrt",
+          "size": "vc2-1c-1gb"
+        }
+
+T+66s   Control Plane → Edge Provisioner Module
+        Action: create_instance
+        + WireGuard鍵ペア生成
+        + WireGuard IP割り当て (10.0.1.13)
+
+T+67s   Edge Provisioner → Vultr API
+        POST /v2/instances
+        {
+          "region": "nrt",
+          "plan": "vc2-1c-1gb",
+          "os_id": 387,  # Ubuntu 24.04
+          "user_data": "<cloud-init script>"
+        }
+        Response: 201 Created
+        {
+          "id": "instance-67890",
+          "main_ip": "198.51.100.20"
+        }
+
+T+68s   Control Plane → Database
+        INSERT INTO edge_nodes (
+          id, origin_id, provider, public_ip, wireguard_ip, status
+        ) VALUES (
+          'edge-4', 'origin-a', 'vultr', '198.51.100.20',
+          '10.0.1.13', 'provisioning'
+        )
+
+T+90s   VPS起動完了（約25秒）
+        Cloud-init実行中...
+
+┌─────────────────────────────────────────────────────────────────┐
+│ Phase 4: 設定配布・サービス起動（自動）                           │
+└─────────────────────────────────────────────────────────────────┘
+
+T+91s   Cloud-init Script (VPS上で実行)
+        #!/bin/bash
+        # 1. 基本パッケージインストール
+        apt-get update
+        apt-get install -y wireguard nginx certbot
+
+        # 2. Control Planeから設定取得
+        EDGE_ID="edge-4"
+        TOKEN="<node_registration_token>"
+        curl -H "Authorization: Bearer $TOKEN" \
+          https://control.example.com/api/v1/edge-nodes/$EDGE_ID/config \
+          -o /tmp/edge-config.tar.gz
+
+        # 3. 設定展開
+        tar -xzf /tmp/edge-config.tar.gz -C /
+
+        # 4. WireGuard起動
+        systemctl enable wg-quick@wg-origin-a
+        systemctl start wg-quick@wg-origin-a
+
+        # 5. Nginx起動
+        nginx -t && systemctl start nginx
+
+        # 6. ヘルスチェックエンドポイント確認
+        sleep 5
+        curl http://localhost/health
+
+        # 7. Control Planeに登録完了報告
+        curl -X POST \
+          https://control.example.com/api/v1/edge-nodes/$EDGE_ID/ready \
+          -H "Authorization: Bearer $TOKEN"
+
+T+180s  Edge Node 4起動完了（約90秒）
+
+T+181s  Edge Node 4 → Control Plane
+        POST /api/v1/heartbeat
+        {
+          "node_id": "edge-4",
+          "status": "healthy",
+          "tunnel_status": "up"
+        }
+
+T+182s  Control Plane → Database
+        UPDATE edge_nodes SET status='active' WHERE id='edge-4'
+
+┌─────────────────────────────────────────────────────────────────┐
+│ Phase 5: SSL証明書取得（自動）                                   │
+└─────────────────────────────────────────────────────────────────┘
+
+T+183s  Control Plane → SSL Manager Module
+        Action: obtain_certificate_for_node
+        {
+          "edge_node_id": "edge-4",
+          "domains": ["example.com", "*.example.com"]
+        }
+
+T+184s  SSL Manager → Edge Node 4 (SSH)
+        certbot certonly --dns-cloudflare \
+          --dns-cloudflare-credentials /root/.secrets/cf.ini \
+          -d example.com -d *.example.com \
+          --non-interactive
+
+T+240s  証明書取得完了（約60秒）
+
+T+241s  Edge Node 4
+        nginx -s reload  # 新証明書適用
+
+┌─────────────────────────────────────────────────────────────────┐
+│ Phase 6: ヘルスチェック・DNS追加（自動）                          │
+└─────────────────────────────────────────────────────────────────┘
+
+T+242s  Health Checker → Edge Node 4
+        GET https://198.51.100.20/health
+        Response: 200 OK
+        ✓ ヘルスチェック成功
+
+T+252s  Health Checker → Edge Node 4 (2回目)
+        Response: 200 OK
+
+T+262s  Health Checker → Edge Node 4 (3回目)
+        Response: 200 OK
+        ✓ 3回連続成功 → 正常判定
+
+T+263s  Control Plane → DNS Manager Module
+        Action: add_dns_record
+        {
+          "edge_node_id": "edge-4",
+          "hostname": "example.com",
+          "ip": "198.51.100.20",
+          "type": "A",
+          "ttl": 30
+        }
+
+T+264s  DNS Manager → Cloudflare API
+        POST /zones/{zone}/dns_records
+        {
+          "type": "A",
+          "name": "@",
+          "content": "198.51.100.20",
+          "ttl": 30
+        }
+        Response: 201 Created
+
+T+265s  Control Plane → Alert System
+        Send Notification:
+        - Slack: "✅ Edge Node 4 (198.51.100.20) added to DNS"
+        - Email: admin@example.com
+        - WebSocket: Web UI更新
+
+T+295s  DNS伝播完了（TTL 30秒経過）
+        新しいユーザーは Edge Node 4 にも振り分けられる
+
+┌─────────────────────────────────────────────────────────────────┐
+│ 完了: システム復旧                                               │
+└─────────────────────────────────────────────────────────────────┘
+
+Total Time: 約5分 (T+0s → T+295s)
+
+状態:
+✅ Edge Node 2: Active (203.0.113.11)
+✅ Edge Node 3: Active (203.0.113.12)
+✅ Edge Node 4: Active (198.51.100.20) ← 新規追加
+❌ Edge Node 1: Deleted (攻撃を受けたノード)
+
+DNS:
+example.com A 203.0.113.11
+example.com A 203.0.113.12
+example.com A 198.51.100.20
+
+トラフィック分散: 33% / 33% / 33%
+```
+
+---
+
+### 自動化レベルの設定
+
+**config.yaml:**
+
+```yaml
+edge_node_management:
+  # 自動DNS除外（常に有効）
+  auto_remove_unhealthy_from_dns: true
+  health_check_failure_threshold: 3
+  health_check_interval: 10  # 秒
+
+  # 自動VPS破棄（オプション）
+  auto_destroy_unhealthy_vps: true
+  destroy_delay: 60  # DNS除外から何秒後に破棄するか
+
+  # 自動VPS交換（オプション）
+  auto_replace_unhealthy_nodes: true  # ✅ これを true にすると完全自動化
+  replace_delay: 5  # VPS破棄から何秒後に新規作成するか
+
+  # 新VPS作成時の設定
+  replacement_strategy:
+    change_provider: true   # プロバイダーをローテーション
+    change_region: true     # リージョンをローテーション
+    preferred_providers: ["vultr", "digitalocean", "hetzner"]
+    preferred_regions: ["nrt", "sgp", "fra"]
+
+  # 最小ノード数の維持
+  min_active_nodes: 2
+  # この数を下回ると自動的に新ノード作成
+```
+
+---
+
 ## データモデル
 
 ### Control Plane DB Schema
@@ -1329,10 +1757,346 @@ Response: 200 OK
 
 | コンポーネント | 主な責務 | 状態管理 | 可用性要件 |
 |---------------|---------|---------|-----------|
-| **Control Plane** | ノード管理、設定配布、監視、DNS更新 | Stateful（DB必須） | 高（冗長化推奨） |
+| **Control Plane** | ノード管理、設定配布、監視、DNS更新 | Stateful（DB必須） | 高（冗長化推奨）※下記参照 |
 | **Edge Node** | リバースプロキシ、SSL終端、WG Client | Stateless（設定は受信） | 中（複数台で冗長） |
 | **Origin Server** | WG Server、アプリホスティング | Stateful（アプリデータ） | 高（単一障害点） |
 | **DNS** | レコード管理、ヘルスチェック | Stateless（API経由） | 高（プロバイダー依存） |
+
+---
+
+## Control Plane高可用性（HA）戦略
+
+### なぜControl PlaneのHAが重要か
+
+**Control Planeが停止した場合の影響:**
+
+✅ **既存トラフィックへの影響: なし**
+- Edge ↔ Origin間のWireGuardトンネルは継続動作
+- ユーザーは通常通りサービスにアクセス可能
+
+❌ **管理機能への影響: あり**
+- 新しいEdge Nodeの追加不可
+- 障害ノードの自動DNS除外停止
+- 自動フェイルオーバー停止
+- SSL証明書の自動更新停止
+- Web UI/APIアクセス不可
+
+**結論:**
+Control Planeが停止しても**既存サービスは継続**するが、**障害対応や新規ノード追加ができなくなる**ため、HAが推奨されます。
+
+---
+
+### HA構成オプション
+
+#### オプション1: Kubernetesデプロイ（最も堅牢）
+
+**構成:**
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-plane
+spec:
+  replicas: 2  # 冗長化
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0  # ゼロダウンタイム
+      maxSurge: 1
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: control-plane
+spec:
+  type: LoadBalancer  # または Ingress経由
+  selector:
+    app: control-plane
+```
+
+**メリット:**
+- ✅ 自動的なヘルスチェック・再起動
+- ✅ ローリングアップデート対応
+- ✅ ノード障害時の自動リスケジュール
+- ✅ 複数レプリカ間のロードバランシング
+
+**デメリット:**
+- ❌ K8sクラスタが必要（運用複雑度が高い）
+- ❌ 小規模環境にはオーバースペック
+
+---
+
+#### オプション2: Docker Compose + 共有DB（推奨：中規模）
+
+**構成:**
+
+```yaml
+version: '3.8'
+
+services:
+  # Control Plane Instance 1
+  control-plane-1:
+    image: kokoaproxy/control-plane:latest
+    environment:
+      NODE_ID: "control-1"
+      DATABASE_URL: postgresql://db-primary:5432/kokoa  # 共有DB
+      REDIS_URL: redis://redis-sentinel:6379
+      LEADER_ELECTION: "true"  # リーダー選出有効
+      HEALTH_CHECK_PORT: 8090
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db-primary
+      - redis-sentinel
+
+  # Control Plane Instance 2
+  control-plane-2:
+    image: kokoaproxy/control-plane:latest
+    environment:
+      NODE_ID: "control-2"
+      DATABASE_URL: postgresql://db-primary:5432/kokoa  # 同じDB
+      REDIS_URL: redis://redis-sentinel:6379
+      LEADER_ELECTION: "true"
+      HEALTH_CHECK_PORT: 8090
+    ports:
+      - "8081:8080"
+    depends_on:
+      - db-primary
+      - redis-sentinel
+
+  # PostgreSQL Primary-Standby構成
+  db-primary:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: kokoa
+      POSTGRES_REPLICATION_MODE: master
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+  db-standby:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: kokoa
+      POSTGRES_REPLICATION_MODE: slave
+      POSTGRES_MASTER_HOST: db-primary
+    volumes:
+      - db_standby_data:/var/lib/postgresql/data
+
+  # Redis Sentinel（リーダー選出用）
+  redis-sentinel:
+    image: redis:7-alpine
+    command: redis-sentinel /etc/redis/sentinel.conf
+
+  # Nginx（ロードバランサー）
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
+    depends_on:
+      - control-plane-1
+      - control-plane-2
+
+volumes:
+  db_data:
+  db_standby_data:
+```
+
+**nginx.conf:**
+```nginx
+upstream control_plane_backend {
+    server control-plane-1:8080 max_fails=3 fail_timeout=10s;
+    server control-plane-2:8080 max_fails=3 fail_timeout=10s backup;  # バックアップ
+}
+
+server {
+    listen 443 ssl http2;
+    server_name control.example.com;
+
+    location / {
+        proxy_pass http://control_plane_backend;
+        proxy_next_upstream error timeout http_500 http_502 http_503;
+    }
+}
+```
+
+**リーダー選出ロジック:**
+```go
+// Control Planeアプリ内でRedis Lockを使用
+func electLeader(redisClient *redis.Client, nodeID string) bool {
+    key := "kokoa:leader"
+    ttl := 10 * time.Second
+
+    // Redisでリーダー選出（先着順）
+    success, err := redisClient.SetNX(ctx, key, nodeID, ttl).Result()
+    if err != nil || !success {
+        return false  // 他のノードがリーダー
+    }
+
+    // リーダーとして動作
+    go renewLeaderLock(redisClient, nodeID)
+    return true
+}
+
+// リーダーのみが実行するタスク
+if isLeader {
+    - ヘルスチェック実行
+    - DNS自動更新
+    - VPS自動作成・削除
+}
+
+// 非リーダーは待機
+if !isLeader {
+    - Web UI/APIのみ提供
+    - DBから読み取り専用
+}
+```
+
+**メリット:**
+- ✅ Docker Composeで比較的簡単に実装
+- ✅ 一方が停止しても自動的に切り替わる
+- ✅ 共有DBで状態を共有
+
+**デメリット:**
+- ⚠️ リーダー選出の実装が必要
+- ⚠️ DBのHA構成が追加で必要
+
+---
+
+#### オプション3: アクティブ-パッシブ（推奨：小規模）
+
+**構成:**
+
+```yaml
+version: '3.8'
+
+services:
+  # Primary Control Plane
+  control-plane-primary:
+    image: kokoaproxy/control-plane:latest
+    environment:
+      MODE: "active"
+      DATABASE_URL: postgresql://db:5432/kokoa
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  # Standby Control Plane（手動切り替え）
+  control-plane-standby:
+    image: kokoaproxy/control-plane:latest
+    environment:
+      MODE: "standby"  # 待機モード（管理機能無効）
+      DATABASE_URL: postgresql://db:5432/kokoa
+    ports:
+      - "8081:8080"
+    restart: unless-stopped
+    profiles:
+      - standby  # デフォルトでは起動しない
+
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: kokoa
+    volumes:
+      - db_data:/var/lib/postgresql/data
+```
+
+**切り替え手順:**
+
+1. Primaryが停止したことを検知
+2. Standbyを起動:
+   ```bash
+   docker-compose --profile standby up -d control-plane-standby
+   ```
+3. Edge NodeとOriginの接続先を変更:
+   ```bash
+   # Edge/Originの設定ファイルを更新
+   CONTROL_PLANE_URL=https://control-standby.example.com
+   ```
+
+**メリット:**
+- ✅ 最もシンプル
+- ✅ リーダー選出不要
+- ✅ 小規模環境に適している
+
+**デメリット:**
+- ❌ 手動切り替えが必要
+- ❌ 自動フェイルオーバーなし
+- ❌ RPO/RTOが長い（数分〜数時間）
+
+---
+
+#### オプション4: 単一インスタンス + 高頻度バックアップ（最小構成）
+
+**構成:**
+
+```yaml
+version: '3.8'
+
+services:
+  control-plane:
+    image: kokoaproxy/control-plane:latest
+    environment:
+      DATABASE_URL: postgresql://db:5432/kokoa
+      BACKUP_ENABLED: "true"
+      BACKUP_INTERVAL: "300"  # 5分ごと
+      BACKUP_S3_BUCKET: "s3://kokoa-backups/"
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: kokoa
+    volumes:
+      - db_data:/var/lib/postgresql/data
+```
+
+**バックアップスクリプト:**
+```bash
+#!/bin/bash
+# 5分ごとに実行
+pg_dump -h db -U postgres kokoa | gzip > /backup/kokoa-$(date +%Y%m%d-%H%M%S).sql.gz
+
+# S3にアップロード
+aws s3 cp /backup/kokoa-*.sql.gz s3://kokoa-backups/
+```
+
+**災害復旧手順:**
+1. 新しいVPSを作成
+2. Docker Composeで再デプロイ
+3. S3から最新バックアップを復元
+4. DNS を新VPSに向ける
+
+**RPO/RTO:**
+- RPO: 5分（最大5分間のデータ損失）
+- RTO: 15〜30分（手動復旧）
+
+**メリット:**
+- ✅ 最もシンプル
+- ✅ 追加コストなし
+
+**デメリット:**
+- ❌ ダウンタイムあり（15〜30分）
+- ❌ 手動復旧が必要
+
+---
+
+### 推奨構成まとめ
+
+| 規模 | 推奨構成 | RPO | RTO | 複雑度 | コスト |
+|------|---------|-----|-----|--------|--------|
+| **大規模**（100+ Edge Nodes） | オプション1: Kubernetes | 0秒 | 数秒 | 高 | 高 |
+| **中規模**（10〜100 Edge Nodes） | オプション2: Docker Compose + 共有DB | 0秒 | 数秒 | 中 | 中 |
+| **小規模**（1〜10 Edge Nodes） | オプション3: アクティブ-パッシブ | 0秒 | 数分 | 低 | 低 |
+| **最小構成**（開発・テスト） | オプション4: 単一 + バックアップ | 5分 | 15〜30分 | 最低 | 最低 |
+
+**本プロジェクトの推奨:**
+- 本番環境: **オプション2（Docker Compose + 共有DB）**
+- 開発環境: **オプション4（単一 + バックアップ）**
 
 ---
 
@@ -1897,7 +2661,7 @@ metadata:
   name: dns-manager
   namespace: kokoa-system
 spec:
-  replicas: 1
+  replicas: 1  # ⚠️ ステートフル（API Rate Limit共有のため）
   selector:
     matchLabels:
       app: dns-manager
@@ -1938,7 +2702,7 @@ metadata:
   name: edge-provisioner
   namespace: kokoa-system
 spec:
-  replicas: 1
+  replicas: 2  # ✅ ステートレス（スケール可能）
   selector:
     matchLabels:
       app: edge-provisioner
@@ -1958,6 +2722,13 @@ spec:
             secretKeyRef:
               name: kokoa-secrets
               key: do_token
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
 
 ---
 apiVersion: v1
@@ -1971,6 +2742,319 @@ spec:
   ports:
   - port: 3000
     targetPort: 3000
+
+---
+# Horizontal Pod Autoscaler（オプション）
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: edge-provisioner-hpa
+  namespace: kokoa-system
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: edge-provisioner
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+```
+
+---
+
+## モジュールのスケーラビリティ特性
+
+### 各モジュールの分類
+
+| モジュール | ステート | スケーラビリティ | 推奨Replicas | 理由 |
+|-----------|----------|----------------|-------------|------|
+| **DNS Manager** | ⚠️ 準ステートフル | 制限あり | 1〜2 | API Rate Limit、競合可能性 |
+| **Edge Provisioner** | ✅ ステートレス | 水平スケール可 | 2〜10 | VPS作成は独立タスク |
+| **SSL Manager** | ⚠️ 準ステートフル | 制限あり | 1〜2 | Let's Encrypt Rate Limit |
+| **Health Checker** | ✅ ステートレス | 水平スケール可 | 2〜10 | 各インスタンスが独立チェック |
+| **Metrics Collector** | ✅ ステートレス | 水平スケール可 | 2〜5 | データ集約のみ |
+| **Outbound Router** | ✅ ステートレス | 水平スケール可 | 2〜10 | ルーティング判定のみ |
+
+---
+
+### 1. DNS Manager Module - スケーラビリティ戦略
+
+**現状の問題:**
+- Cloudflare API Rate Limit: 1200 req/5min
+- 複数レプリカが同時にAPI呼び出しすると制限に引っかかる可能性
+
+**解決策1: 単一インスタンス + キューイング（推奨：小〜中規模）**
+
+```go
+// DNS Manager内部でキューを管理
+type DNSManager struct {
+    queue    chan DNSTask
+    workers  int  // ワーカー数（並列度）
+}
+
+func (m *DNSManager) Start() {
+    for i := 0; i < m.workers; i++ {
+        go m.worker()
+    }
+}
+
+func (m *DNSManager) worker() {
+    for task := range m.queue {
+        // Rate Limitを考慮してAPI呼び出し
+        time.Sleep(rateLimit)
+        m.executeTask(task)
+    }
+}
+```
+
+**メリット:**
+- ✅ シンプル
+- ✅ Rate Limit管理が容易
+- ✅ 競合なし
+
+**デメリット:**
+- ❌ 単一障害点
+
+---
+
+**解決策2: 複数レプリカ + 分散ロック（推奨：大規模）**
+
+```go
+// Redis Lockを使用して排他制御
+func (m *DNSManager) AddRecord(hostname, ip string) error {
+    // ロック取得（TTL: 30秒）
+    lock := redis.Lock("dns:add:"+hostname, 30*time.Second)
+    if !lock.Acquire() {
+        return errors.New("Another instance is processing")
+    }
+    defer lock.Release()
+
+    // API呼び出し
+    return m.provider.AddRecord(hostname, ip)
+}
+```
+
+**Kubernetes設定:**
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dns-manager
+spec:
+  replicas: 2  # 冗長化
+  strategy:
+    type: RollingUpdate
+```
+
+**メリット:**
+- ✅ 高可用性
+- ✅ ローリングアップデート可能
+
+**デメリット:**
+- ⚠️ やや複雑
+- ⚠️ Redis依存
+
+---
+
+### 2. Edge Provisioner Module - スケーラビリティ戦略
+
+**特性:**
+- ✅ 完全ステートレス
+- ✅ 各VPS作成は独立タスク
+- ✅ 水平スケール容易
+
+**推奨構成:**
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge-provisioner
+spec:
+  replicas: 3  # 通常時
+  strategy:
+    type: RollingUpdate
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: edge-provisioner-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: edge-provisioner
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Pods
+    pods:
+      metric:
+        name: vps_provision_queue_length
+      target:
+        type: AverageValue
+        averageValue: "10"  # キューが10を超えたらスケール
+```
+
+**高負荷時のシナリオ:**
+
+```
+通常時:
+- 3 replicas
+- 処理能力: 3 VPS/min
+
+大規模攻撃時（10台のVPS交換が必要）:
+- HPA が自動的にスケール
+- → 10 replicas に増加
+- 処理能力: 10 VPS/min
+- 約2分で全VPS交換完了
+
+攻撃終息後:
+- HPA が自動的にスケールダウン
+- → 3 replicas に戻る
+```
+
+---
+
+### 3. SSL Manager Module - スケーラビリティ戦略
+
+**現状の問題:**
+- Let's Encrypt Rate Limit: 50 certs/week/domain
+- 複数レプリカが同時に証明書取得すると重複リクエスト
+
+**推奨構成:**
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ssl-manager
+spec:
+  replicas: 2  # アクティブ-パッシブ
+  strategy:
+    type: Recreate  # 同時起動を避ける
+```
+
+**リーダー選出:**
+```go
+// SSL Managerはリーダーのみが証明書取得
+func (m *SSLManager) Start() {
+    if m.electLeader() {
+        go m.runCertificateRenewer()
+        go m.runNewCertificateProcessor()
+    } else {
+        log.Info("Standby mode, waiting for leader failure")
+        m.waitForLeaderFailure()
+    }
+}
+```
+
+---
+
+### 4. Health Checker Module - スケーラビリティ戦略
+
+**特性:**
+- ✅ 完全ステートレス
+- ✅ 各チェックは独立
+- ✅ 負荷分散容易
+
+**推奨構成:**
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: health-checker
+spec:
+  replicas: 5  # 通常時
+  strategy:
+    type: RollingUpdate
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: health-checker-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: health-checker
+  minReplicas: 5
+  maxReplicas: 50
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 60
+```
+
+**チェック分散戦略:**
+
+```go
+// Consistent Hashingでチェック対象を分散
+func (h *HealthChecker) shouldCheckNode(nodeID string) bool {
+    hash := consistentHash(nodeID)
+    mySlot := h.instanceID % h.totalInstances
+    targetSlot := hash % h.totalInstances
+    return mySlot == targetSlot
+}
+```
+
+**スケーラビリティ例:**
+
+```
+100 Edge Nodes の場合:
+- 5 replicas → 各インスタンスが 20 nodes をチェック
+- 10秒間隔 → 各インスタンスは 2 req/s
+
+1000 Edge Nodes の場合（自動スケール）:
+- HPA が 25 replicas に増加
+- 各インスタンスが 40 nodes をチェック
+- 10秒間隔 → 各インスタンスは 4 req/s
+```
+
+---
+
+### 推奨構成まとめ
+
+**小規模（1〜10 Edge Nodes）:**
+```yaml
+dns-manager: 1 replica
+edge-provisioner: 1 replica
+ssl-manager: 1 replica
+health-checker: 1 replica
+```
+
+**中規模（10〜100 Edge Nodes）:**
+```yaml
+dns-manager: 2 replicas（冗長化）
+edge-provisioner: 3 replicas + HPA (max 10)
+ssl-manager: 2 replicas（アクティブ-パッシブ）
+health-checker: 3 replicas + HPA (max 20)
+```
+
+**大規模（100+ Edge Nodes）:**
+```yaml
+dns-manager: 2 replicas + 分散ロック
+edge-provisioner: 5 replicas + HPA (max 50)
+ssl-manager: 2 replicas + 分散ロック
+health-checker: 10 replicas + HPA (max 100)
 ```
 
 **デプロイ:**
