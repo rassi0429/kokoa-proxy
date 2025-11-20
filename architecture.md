@@ -101,30 +101,230 @@ Cloudflare Tunnelのような体験を、モジュラーかつセルフホスト
 
 ---
 
-## トラフィックフロー（シンプル版）
+## トラフィックフロー（重要！）
+
+### データプレーン vs コントロールプレーン
+
+**❗重要:** Control Planeは実際のユーザートラフィックを通りません。
 
 ```
+┌─────────────────────────────────────────────────────────┐
+│                   データプレーン                         │
+│         （実際のユーザートラフィック）                    │
+└─────────────────────────────────────────────────────────┘
+
 【Inbound（外部→サービス）】
-ユーザー
-  → Edge Node（VPS、203.0.113.10）
-    → WireGuardトンネル
-      → Origin（自宅、10.0.0.1）
-        → アプリ（ポート3000）
+ユーザー (1.2.3.4)
+  ↓ HTTPS
+Edge Node (203.0.113.10)
+  ↓ WireGuard (暗号化、直接接続)
+Origin (10.0.1.1)
+  ↓ HTTP
+アプリ (localhost:3000)
+
+※ Control Planeは経由しない！
+
 
 【Outbound（サービス→外部）】※オプション
-アプリ（ポート3000）
-  → Origin（10.0.0.1）
-    → WireGuardトンネル
-      → Edge Node（10.0.0.10）
-        → インターネット（203.0.113.10から出る）
+アプリ (localhost:3000)
+  ↓
+Origin (10.0.1.1)
+  ↓ WireGuard (暗号化、直接接続)
+Edge Node (10.0.1.10)
+  ↓ NAT
+インターネット (送信元: 203.0.113.10)
 
-【管理】
+※ Control Planeは経由しない！
+
+
+┌─────────────────────────────────────────────────────────┐
+│                 コントロールプレーン                      │
+│              （管理・設定・監視のみ）                     │
+└─────────────────────────────────────────────────────────┘
+
+【管理・設定】
 管理者
-  → Control Plane（Web UI）
-    → Edge Node作成指示
-    → Origin登録
-    → ルーティング設定
+  ↓ HTTPS
+Control Plane (Web UI/API)
+  ↓ API呼び出し
+Edge Provisioner Module → VPS作成
+DNS Manager Module → DNS更新
+SSL Manager Module → 証明書取得
+
+【監視】
+Edge Node ──┐
+Origin     ──┼→ ハートビート → Control Plane
+Health Check ┘
+
+※ ユーザートラフィックは通らない！
 ```
+
+---
+
+### なぜControl Planeを経由しないのか？
+
+**理由1: 単一障害点の回避**
+```
+❌ Control Plane経由の場合:
+ユーザー → Edge → Control Plane → Origin
+                      ↑
+                  ここが止まると全滅
+```
+
+**理由2: ボトルネックの回避**
+```
+Control Planeが全トラフィックを処理
+→ 高スペックサーバーが必要
+→ コスト増
+→ スケールしない
+```
+
+**理由3: レイテンシの最小化**
+```
+✅ 現在の設計:
+Edge → Origin (1ホップ、10-30ms)
+
+❌ Control Plane経由:
+Edge → Control Plane → Origin (2ホップ、20-60ms)
+```
+
+**理由4: シンプルさ**
+```
+WireGuardの暗号化トンネルで直接接続
+→ Control Planeが落ちても既存の通信は継続
+```
+
+---
+
+### Control Planeの役割（データは通さない）
+
+**Control Planeがやること:**
+- ✅ Edge Node作成・削除
+- ✅ WireGuard設定生成・配布
+- ✅ DNS レコード管理
+- ✅ SSL証明書管理
+- ✅ ヘルスチェック・監視
+- ✅ ルーティング設定管理
+
+**Control Planeがやらないこと:**
+- ❌ ユーザートラフィックの転送
+- ❌ プロキシ・ロードバランシング
+- ❌ SSL終端
+
+---
+
+### 具体例: ユーザーがapp.example.comにアクセス
+
+```
+ステップ1: DNS問い合わせ
+ユーザー → DNS
+← 203.0.113.10, 203.0.113.11 (Edge NodeのIP)
+
+ステップ2: HTTPSリクエスト
+ユーザー (1.2.3.4)
+  → Edge Node 1 (203.0.113.10:443)
+    GET https://app.example.com/
+
+ステップ3: Edge NodeがSSL終端
+Edge Node 1:
+  - SSL終端（証明書検証）
+  - Nginxがupstream選択
+    upstream origin_a { server 10.0.1.1:80; }
+
+ステップ4: WireGuard経由で転送
+Edge Node 1 (10.0.1.10)
+  → WireGuardトンネル (暗号化)
+    → Origin (10.0.1.1:80)
+      GET / HTTP/1.1
+      Host: app.example.com
+      X-Real-IP: 1.2.3.4
+
+ステップ5: Originがアプリに転送
+Origin:
+  - HAProxy/Nginxがアプリに転送
+    → localhost:3000
+
+ステップ6: レスポンス（逆方向）
+アプリ → Origin → WireGuard → Edge → ユーザー
+
+※ 全プロセスでControl Planeは関与しない
+```
+
+---
+
+### Control Planeが停止した場合の影響
+
+**既存のトラフィック:**
+```
+✅ 影響なし
+Edge ↔ Origin のWireGuardトンネルは継続
+ユーザーは普通にアクセス可能
+```
+
+**できなくなること:**
+```
+❌ 新しいEdge Node追加
+❌ DNS変更
+❌ SSL証明書更新
+❌ ヘルスチェック（自動フェイルオーバー停止）
+❌ Web UI/API操作
+```
+
+**復旧:**
+```
+Control Planeを再起動すれば元通り
+既存のEdge/Originには影響なし
+```
+
+---
+
+### アーキテクチャ図（データプレーン分離版）
+
+```
+┌────────────────────────────────────────────────────┐
+│                データプレーン                       │
+│           （ユーザートラフィック経路）               │
+└────────────────────────────────────────────────────┘
+
+  [ユーザー]
+      ↓ HTTPS
+  [Edge Node] ←─┐
+      ↓ WG      │ 直接接続
+  [Origin]  ←───┘ (Control Plane経由しない)
+      ↓
+  [アプリ]
+
+
+┌────────────────────────────────────────────────────┐
+│              コントロールプレーン                    │
+│          （管理・設定・監視のみ）                    │
+└────────────────────────────────────────────────────┘
+
+  [管理者]
+      ↓
+  [Control Plane]
+      ├─→ [Edge Node] (設定配布、ヘルスチェック)
+      ├─→ [Origin]    (設定配布、ヘルスチェック)
+      ├─→ [DNS API]   (レコード管理)
+      └─→ [VPS API]   (Edge作成・削除)
+```
+
+---
+
+### まとめ
+
+| 項目 | 経由するもの | 経由しないもの |
+|------|------------|--------------|
+| **ユーザートラフィック** | Edge Node, Origin | ❌ Control Plane |
+| **WireGuard設定** | ✅ Control Plane | Edge, Origin |
+| **DNS更新** | ✅ Control Plane | Edge, Origin |
+| **ヘルスチェック** | ✅ Control Plane | ユーザートラフィック |
+
+**結論:**
+- **データプレーン**: Edge ↔ Origin（直接、高速）
+- **コントロールプレーン**: Control Plane → すべて（管理のみ）
+
+これにより、Control Planeが停止してもサービスは継続します。
 
 ---
 
