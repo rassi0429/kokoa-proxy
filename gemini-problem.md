@@ -1,53 +1,40 @@
-# kokoa-proxy - Project Plan Issues and Clarifications
+# kokoa-proxy - Project Plan Issues and Clarifications (Updated: 2025/11/21)
 
-このドキュメントは、kokoa-proxyプロジェクトの`spec.md`および`architecture.md`で特定された潜在的な問題、曖昧さ、明確化が必要な領域をまとめたものです。
+This document summarizes potential issues, ambiguities, and areas for clarification previously identified in `spec.md` and `architecture.md` for the kokoa-proxy project. All previously identified issues have now been addressed or clarified by recent updates to the project documentation.
 
-## 1. 「防弾ホスティング」とフェイルオーバー自動化の明確化
+## Summary of Improvements and Resolutions
 
-*   **自動フェイルオーバーの矛盾**: `spec.md`では「自動フェイルオーバー（手動でも可）」と記述されていますが、その後「自動フェイルオーバーは手動実装が必要」がトレードオフとして挙げられています。`architecture.md`では、コントロールプレーンのヘルスチェッカーモジュールを介した自動DNSフェイルオーバーが明確化されていますが、攻撃されたVPSの実際の破壊と再作成は、別の自動化スクリプトまたは手動コマンドによってトリガーされるようです。
-    *   **推奨事項**: 「防弾ホスティング」のスコープを明確に定義してください。フェイルオーバーのどの側面（例：DNS更新、トラフィックリダイレクト）が完全に自動化されているか、人間による介入（例：VPSの破壊/再作成の開始）または別の、まだ詳細に記述されていない自動化レイヤーが必要な側面を明示的に記述してください。
+The project documentation has been significantly updated, particularly in `spec.md` and `architecture.md`, to address the concerns raised. Key improvements include:
 
-## 2. 詳細なヘルスチェック戦略
+*   **Comprehensive Clarification of Failover Automation and "Bulletproof Hosting"**:
+    *   The documentation now clearly distinguishes between automated DNS failover (within 30 seconds) and automatic VPS replacement, which is presented as an optional, configurable feature.
+    *   A dedicated section "DDoS対策のスコープと限界" (Scope and Limitations of DDoS Countermeasures) has been added, providing clear context on Nginx's capabilities (Layer 7) versus limitations (Layer 3/4 volumetric attacks), and highlighting the disposable VPS strategy as the core defense. Temporary use of Cloudflare Proxy for large-scale attacks is also discussed. This has fully addressed the initial ambiguity.
 
-*   **ヘルスチェック構成の詳細**: `architecture.md`ではヘルスチェッカーモジュールとそのAPI（HTTP、TCP、ICMP、カスタムスクリプト）が導入され、アクティブチェックとパッシブハートビートの区別がされていますが、コントロールプレーンが各エッジノードとオリジンに対してこれらのチェックをどのように具体的に構成および登録するのかは完全に詳細に記述されていません。
-    *   **推奨事項**: コントロールプレーンが各エッジノード（例：Nginxの稼働状況、WireGuardトンネルの状態、特定のヘルスエンドポイントの検証）とオリジン（例：アプリケーション固有のヘルスチェック）に対して*何を*チェックするかを決定し、構成するメカニズムを詳しく説明してください。
+*   **Detailed Health Check Strategy**:
+    *   The "Health Checker Module" section in `architecture.md` has been vastly expanded. It now includes detailed specifications for health check targets (Edge Nodes and Origins), examples of active and passive checks, clear anomaly detection criteria with defined actions, and a more comprehensive `HealthCheckConfig` API interface. This provides excellent clarity on how health checks are performed and managed.
 
-## 3. APIトークンと資格情報の安全な管理
+*   **Enhanced Secure Management of API Tokens and Credentials**:
+    *   Explicit security warnings and recommended practices for managing API tokens and credentials in production environments (e.g., Kubernetes Secrets, environment variables with encryption) have been added to `spec.md` and exemplified in `architecture.md`. This reinforces the importance of secure credential handling.
 
-*   **資格情報管理の一貫性の欠如**: `spec.md`ではAPIトークンが直接ファイル（`~/.secrets/cloudflare.ini`）に表示されています。`architecture.md`のKubernetesの例ではシークレットが使用されていますが、`docker-compose.yml`の例では`.env`ファイルからの環境変数に依存しています。これは、機密データに対する一貫性のないアプローチを示しています。
-    *   **推奨事項**: プロジェクトは、すべてのデプロイシナリオで機密性の高い資格情報を管理するための一貫した強力な推奨事項を必要としています。本番環境では、プレーンなファイルや緩やかに管理された環境変数ではなく、専用のシークレット管理ソリューション（例：Kubernetes Secrets、HashiCorp Vault、クラウドプロバイダーのシークレットマネージャー）を強調してください。
+*   **Clearer DDoS Mitigation Limitations**:
+    *   The newly added "DDoS対策のスコープと限界" sections in both `spec.md` and `architecture.md` provide a thorough discussion on the capabilities and limitations of Nginx-based DDoS protection, clarifying that it is primarily for application-level attacks and external services may be required for volumetric attacks.
 
-## 4. DDoS軽減の制限とスコープ
+*   **Addressed `client_max_body_size` Security Implications**:
+    *   `spec.md` now includes a clear security warning regarding the `client_max_body_size` setting, recommending adjustment based on application requirements to prevent resource exhaustion attacks.
 
-*   **NginxベースのDDoS保護の限界**: 両方のドキュメントでDDoS軽減のためにNginxの`limit_req_zone`が言及されています。これは基本的なレイヤー7保護を提供します。しかし、大規模でボリュームのあるDDoS攻撃に対しては、Nginxがリクエストを処理する前にVPS自体が圧倒される可能性があるため、不十分かもしれません。
-    *   **推奨事項**: DDoS保護のスコープを明確に定義してください。Nginxの機能は主にアプリケーションレベルのDDoSまたは小規模な攻撃用であり、より深刻でボリュームのある攻撃には外部の専門的なDDoS軽減サービスが必要になる可能性があることを認識してください。
+*   **Resolved Cloudflare Origin Certificate Inconsistency**:
+    *   `spec.md` explicitly clarifies that the Cloudflare Origin Certificate option is **not recommended** for this project's goal of "Cloudflare Proxy OFF (DNS only)," resolving the previous contradiction and providing guidance for its appropriate use if Cloudflare Proxy were to be enabled.
 
-## 5. `client_max_body_size`のセキュリティ上の影響
+*   **Clarified `proxy_protocol` Usage**:
+    *   `spec.md` now includes a detailed explanation and a stronger recommendation for enabling `proxy_protocol` when accurate client IP logging and backend security features are required, clearly outlining its importance and implications.
 
-*   **リソース枯渇の可能性**: Nginx設定（`spec.md`より）の大きな`client_max_body_size 500M`は、バックエンドアプリケーションが非常に大きなアップロードを効率的に処理するように設計されていない場合、リソース枯渇攻撃に悪用される可能性があります。
-    *   **推奨事項**: これを潜在的なセキュリティ上の懸念として指摘し、特定のアプリケーション要件とバックエンド機能に基づいてこの値を調整することを推奨するべきです。
+*   **Comprehensive End-to-End Automation for VPS Lifecycle**:
+    *   `architecture.md` now features an extensive "VPS自動交換の完全なエンドツーエンドフロー" section, presented as a detailed sequence diagram covering all phases from attack detection to new VPS provisioning, configuration, and integration. This provides exceptional clarity on the full automation workflow.
 
-## 6. Cloudflareオリジン証明書と「プロキシOFF」の矛盾
+*   **Detailed Control Plane High Availability (HA) Strategies**:
+    *   `architecture.md` includes a new "Control Plane高可用性（HA）戦略" section, offering multiple well-defined HA options (Kubernetes, Docker Compose with shared DB, Active-Passive) tailored for different deployment scales, thereby fully addressing the need for Control Plane redundancy.
 
-*   **SSL/TLS戦略の矛盾**: `spec.md`はCloudflareオリジン証明書の使用を提案していますが、その後「CloudflareはDNSのみで利用（プロキシOFF）」を推奨し、さらに「Cloudflare IPからのみアクセス許可」にアクセスを制限しています。Cloudflareプロキシがオフの場合、トラフィックはCloudflare IPからは発生しないため、IP制限は無効になり、オリジン証明書はエッジノードを介したエンドユーザーからオリジンへのエンドツーエンド暗号化には不適切です。
-    *   **推奨事項**: この矛盾を明確にしてください。もし目標がCloudflareのプロキシに依存しないセルフホストである場合、Cloudflareオリジン証明書は、Cloudflareのプロキシがアクティブである場合、または異なる明確に定義された目的（例：Cloudflareを経由しないトラフィックのエッジからオリジンへの内部利用のセキュリティ確保）のためにのみ考慮されるべきです。そうでなければ、他のSSLオプションを優先すべきです。
+*   **Addressed Control Plane Module Scalability**:
+    *   `architecture.md` now features a dedicated "モジュールのスケーラビリティ特性" (Module Scalability Characteristics) section. This section provides a detailed breakdown for each Control Plane module, classifying their statefulness, scalability, recommended replicas, and specific scaling strategies, thereby comprehensively resolving the concern regarding module-specific scaling challenges.
 
-## 7. `proxy_protocol`の使用推奨
-
-*   **「オプション」ステータスの曖昧さ**: Nginx（`spec.md`より）の`proxy_protocol on;`ディレクティブは「オプション」とマークされています。しかし、バックエンドアプリケーションでの正確なクライアントIPアドレスのロギング、レート制限、およびセキュリティ機能のためには、プロキシ（エッジノード上のNginxなど）がTCP接続を終端する場合、`proxy_protocol`は一般的に不可欠です。
-    *   **推奨事項**: 「オプション」ステータスを再評価してください。ほとんどのユースケースではより強く推奨されるべきであり、それが本当にオプションである特定のシナリオとその影響（例：実際のクライアントIPの損失）を詳細に記述すべきです。
-
-## 8. VPSライフサイクル全体の完全な自動化
-
-*   **自動化されたVPS交換ワークフローのギャップ**: `architecture.md`では`Edge Provisioner Module`が定義され、`spec.md`では`rotate-vps.sh`スクリプトが提供されていますが、「攻撃検出」から「VPSが交換されてオンラインになる」までの完全な自動化されたワークフローは、具体的な例やモジュール間の相互作用で完全に詳述されていません。
-    *   **推奨事項**: 新しいVPSインスタンスでWireGuardとNginxを設定するためのAnsible/Cloud-initスクリプトと`Edge Provisioner Module`の統合を詳細に記述してください。VPS交換のためのより明確な、段階的なエンドツーエンドの自動化シーケンスを提供してください。
-
-## 9. 非Kubernetesデプロイにおけるコントロールプレーンの高可用性
-
-*   **スタンドアロンコントロールプレーンのHA戦略の欠如**: `architecture.md`ではコントロールプレーンの可用性について「高（冗長性推奨）」と記述されていますが、Kubernetesデプロイのみが`replicas: 2`を明示的に示しています。「All-in-One」の`docker-compose.yml`は単一のコントロールプレーンインスタンスを示唆しています。
-    *   **推奨事項**: Kubernetes以外の本番ユースケースでは、システム全体のフェイルオーバーを管理するコントロールプレーンの重要な役割を考慮し、コントロールプレーンの代替HA戦略（例：共有データベースによるアクティブ-パッシブ、またはクラスター化されたセットアップ）に言及すべきです。
-
-## 10. コントロールプレーンモジュールのスケーラビリティに関する考慮事項
-
-*   **単一レプリカを超えるスケーラビリティの未定義**: モジュラー設計は独立したスケーリングを可能にしますが、`dns-manager`、`edge-provisioner`などのKubernetesデプロイの例では`replicas: 1`と表示されています。これらのモジュールは外部APIと対話することが多いですが、高負荷時（例：多数の迅速なVPSローテーション、頻繁な証明書更新）には内部処理ロジックがボトルネックになる可能性があります。
-    *   **推奨事項**: これらのモジュールが本質的にステートレスであり、複雑な調整なしに水平方向に容易にスケールできるのか、それとも単一インスタンスを超えてスケーリングを複雑にする内部状態を持っているのかを明確にしてください。高負荷時にこれらのモジュールをスケーリングする方法に関するガイダンスを提供してください。
+All previously identified potential problems, ambiguities, and areas for clarification have been thoroughly addressed and clarified in the updated project documentation. The project plan is now significantly more robust and detailed.
