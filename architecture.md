@@ -1,8 +1,415 @@
-# Pangolin型トンネリングプロキシのアーキテクチャ
+# Kokoa Proxy - モジュラーアーキテクチャ設計
 
 ## 概要
 
-Pangolinのような、コントロールプレーンで管理される複数エッジノードによる高可用性トンネリングプロキシシステムのアーキテクチャ設計。
+Cloudflare Tunnelのような体験を、モジュラーかつセルフホストで実現する高可用性トンネリングプロキシシステム。
+
+**設計思想:**
+- **モジュラー**: 各機能を独立したモジュールに分離
+- **プラガブル**: DNS Provider、VPS Providerなどを差し替え可能
+- **スケーラブル**: 各モジュールを独立してスケール可能
+- **保守性**: モジュール単位でアップデート・交換可能
+
+---
+
+## アーキテクチャ概要図
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Control Plane Core                      │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
+│  │   Web UI     │  │   REST API   │  │  WebSocket   │      │
+│  └──────────────┘  └──────────────┘  └──────────────┘      │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │            Router & Orchestrator                     │  │
+│  └──────────────────────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │            Database (PostgreSQL/SQLite)              │  │
+│  └──────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+                            ↕ API
+┌─────────────────────────────────────────────────────────────┐
+│                      モジュール層                            │
+├──────────────┬──────────────┬──────────────┬──────────────┤
+│ DNS Manager  │ Edge Prov.   │ SSL Manager  │ Health Check │
+│ Module       │ Module       │ Module       │ Module       │
+│              │              │              │              │
+│ [Cloudflare] │ [DigitalOcn] │ [ACME/LE]   │ [HTTP/TCP]   │
+│ [Route53]    │ [Vultr]      │ [Cloudflare] │ [Custom]     │
+│ [PowerDNS]   │ [Manual]     │ [Manual]     │              │
+└──────────────┴──────────────┴──────────────┴──────────────┘
+                            ↕
+┌─────────────────────────────────────────────────────────────┐
+│                    Infrastructure Layer                     │
+├──────────────┬──────────────┬──────────────────────────────┤
+│ Edge Nodes   │ Origin Nodes │ External Services            │
+│ (VPS)        │ (自宅/K8s)    │ (DNS/VPS APIs)               │
+└──────────────┴──────────────┴──────────────────────────────┘
+```
+
+---
+
+## コアコンポーネント
+
+### Control Plane Core
+
+**役割:**
+- 全体のオーケストレーション
+- 状態管理（DB）
+- Web UI/API提供
+- モジュール間の調整
+
+**責務:**
+- Route管理（CRUD）
+- Origin/Edge Node管理（CRUD）
+- モジュールへのタスク委譲
+- イベント配信（WebSocket）
+- 認証・認可
+
+**技術スタック:**
+- バックエンド: Go/Python/Node.js
+- DB: PostgreSQL/SQLite
+- キュー: Redis/Memory Queue
+- WebSocket: Socket.io/native
+
+**含まない機能（モジュールに委譲）:**
+- DNS操作（DNS Manager Moduleへ）
+- VPS操作（Edge Provisioner Moduleへ）
+- 証明書操作（SSL Manager Moduleへ）
+- ヘルスチェック実行（Health Checker Moduleへ）
+
+---
+
+## モジュール設計
+
+### 1. DNS Manager Module
+
+**役割:**
+DNSレコードの自動管理
+
+**プロバイダー実装:**
+- Cloudflare（優先）
+- AWS Route53
+- Google Cloud DNS
+- PowerDNS（セルフホスト）
+- Manual（API経由で手動実行）
+
+**API Interface:**
+
+```go
+type DNSManager interface {
+    // レコード追加
+    AddRecord(hostname string, recordType string, value string) error
+
+    // レコード削除
+    RemoveRecord(hostname string, recordID string) error
+
+    // レコード一覧取得
+    ListRecords(hostname string) ([]DNSRecord, error)
+
+    // ヘルスチェック統合（オプション）
+    EnableHealthCheck(recordID string, healthCheckConfig HealthCheckConfig) error
+}
+```
+
+**設定例:**
+
+```yaml
+# config.yaml
+dns:
+  provider: cloudflare
+  cloudflare:
+    api_token: ${CLOUDFLARE_API_TOKEN}
+    zone_id: ${CLOUDFLARE_ZONE_ID}
+  ttl: 60  # 秒
+  proxy: false  # Cloudflare Proxyを使わない
+```
+
+**デプロイ:**
+```bash
+# 独立したサービスとして起動
+docker run -d \
+  --name kokoa-dns-manager \
+  -e DNS_PROVIDER=cloudflare \
+  -e CLOUDFLARE_API_TOKEN=xxx \
+  kokoaproxy/dns-manager:latest
+```
+
+---
+
+### 2. Edge Provisioner Module
+
+**役割:**
+Edge Nodeの自動作成・削除
+
+**プロバイダー実装:**
+- DigitalOcean
+- Vultr
+- Hetzner
+- AWS EC2
+- Manual（既存VPSを手動登録）
+
+**API Interface:**
+
+```go
+type EdgeProvisioner interface {
+    // VPS作成
+    CreateInstance(config InstanceConfig) (Instance, error)
+
+    // VPS削除
+    DestroyInstance(instanceID string) error
+
+    // VPSステータス取得
+    GetInstanceStatus(instanceID string) (InstanceStatus, error)
+
+    // SSH接続情報取得
+    GetSSHConfig(instanceID string) (SSHConfig, error)
+}
+
+type InstanceConfig struct {
+    Provider   string // "digitalocean", "vultr"
+    Region     string // "sgp1", "nrt"
+    Size       string // "s-1vcpu-1gb"
+    Image      string // カスタムイメージID（WireGuard等プリインストール）
+    SSHKeyID   string
+    UserData   string // cloud-init script
+}
+```
+
+**設定例:**
+
+```yaml
+# config.yaml
+edge_provisioner:
+  provider: digitalocean
+  digitalocean:
+    api_token: ${DO_API_TOKEN}
+    default_region: sgp1
+    default_size: s-1vcpu-1gb
+    ssh_key_id: ${DO_SSH_KEY_ID}
+  auto_provision: true  # 自動作成を有効化
+  min_nodes: 2
+  max_nodes: 10
+```
+
+**デプロイ:**
+```bash
+docker run -d \
+  --name kokoa-edge-provisioner \
+  -e PROVIDER=digitalocean \
+  -e DO_API_TOKEN=xxx \
+  kokoaproxy/edge-provisioner:latest
+```
+
+---
+
+### 3. SSL Manager Module
+
+**役割:**
+SSL/TLS証明書の自動取得・更新・配布
+
+**プロバイダー実装:**
+- Let's Encrypt (ACME)
+- Cloudflare Origin Certificate
+- ZeroSSL
+- Manual（手動アップロード）
+
+**API Interface:**
+
+```go
+type SSLManager interface {
+    // 証明書取得
+    ObtainCertificate(domains []string, method string) (Certificate, error)
+
+    // 証明書更新
+    RenewCertificate(certID string) (Certificate, error)
+
+    // 証明書配布（Edge Nodeへ）
+    DistributeCertificate(certID string, nodeIDs []string) error
+
+    // 証明書状態確認
+    GetCertificateStatus(certID string) (CertStatus, error)
+}
+
+type Certificate struct {
+    ID          string
+    Domains     []string
+    Issuer      string
+    ExpiresAt   time.Time
+    Certificate []byte
+    PrivateKey  []byte
+}
+```
+
+**設定例:**
+
+```yaml
+# config.yaml
+ssl:
+  provider: letsencrypt
+  letsencrypt:
+    email: admin@example.com
+    challenge_method: dns-01  # dns-01, http-01
+    dns_provider: cloudflare  # DNS-01の場合
+  auto_renew: true
+  renew_days_before: 30
+```
+
+**デプロイ:**
+```bash
+docker run -d \
+  --name kokoa-ssl-manager \
+  -e SSL_PROVIDER=letsencrypt \
+  -e ACME_EMAIL=admin@example.com \
+  kokoaproxy/ssl-manager:latest
+```
+
+---
+
+### 4. Health Checker Module
+
+**役割:**
+Edge Node・Originのヘルスチェック
+
+**チェック方法:**
+- HTTP/HTTPS (status code check)
+- TCP (port check)
+- ICMP (ping)
+- Custom script
+
+**API Interface:**
+
+```go
+type HealthChecker interface {
+    // ヘルスチェック登録
+    RegisterCheck(target string, config HealthCheckConfig) (string, error)
+
+    // ヘルスチェック実行
+    ExecuteCheck(checkID string) (HealthCheckResult, error)
+
+    // ヘルスチェック削除
+    RemoveCheck(checkID string) error
+
+    // ステータス取得
+    GetCheckStatus(checkID string) (CheckStatus, error)
+}
+
+type HealthCheckConfig struct {
+    Type      string // "http", "tcp", "icmp"
+    Interval  int    // 秒
+    Timeout   int    // 秒
+    Retries   int
+    Threshold int    // 連続失敗回数
+}
+```
+
+**設定例:**
+
+```yaml
+# config.yaml
+health_checker:
+  default_interval: 10  # 秒
+  default_timeout: 5
+  default_retries: 3
+  default_threshold: 3
+  workers: 10  # 並列実行数
+```
+
+**デプロイ:**
+```bash
+docker run -d \
+  --name kokoa-health-checker \
+  kokoaproxy/health-checker:latest
+```
+
+---
+
+### 5. Metrics Collector Module（オプション）
+
+**役割:**
+メトリクス収集・保存・可視化
+
+**機能:**
+- トラフィック統計
+- レスポンスタイム
+- エラーレート
+- リソース使用率
+
+**技術スタック:**
+- Prometheus（メトリクス保存）
+- Grafana（可視化）
+- または、シンプルなカスタム実装
+
+**デプロイ:**
+```bash
+docker run -d \
+  --name kokoa-metrics \
+  kokoaproxy/metrics-collector:latest
+```
+
+---
+
+### 6. Outbound Router Module（オプション）
+
+**役割:**
+Outbound Trafficのルーティング管理
+
+**機能:**
+- スプリットトンネル設定
+- ロードバランシング
+- フェイルオーバー
+
+**デプロイ:**
+```bash
+docker run -d \
+  --name kokoa-outbound-router \
+  kokoaproxy/outbound-router:latest
+```
+
+---
+
+## モジュール間通信
+
+### イベント駆動アーキテクチャ
+
+**Control Plane → Module:**
+
+```json
+// Edge Node追加イベント
+{
+  "event": "edge.created",
+  "edge_node_id": "uuid",
+  "public_ip": "203.0.113.10",
+  "routes": [
+    {
+      "hostname": "app.example.com",
+      "origin_id": "uuid"
+    }
+  ]
+}
+```
+
+**処理フロー:**
+
+```
+1. Control Plane: Edge Node作成決定
+   ↓
+2. Edge Provisioner Module: VPS作成
+   ↓ (VPS作成完了)
+3. Edge Provisioner → Control Plane: edge.provisioned イベント
+   ↓
+4. Control Plane → DNS Manager: DNS追加リクエスト
+   ↓
+5. DNS Manager: Aレコード追加
+   ↓ (DNS追加完了)
+6. DNS Manager → Control Plane: dns.record.added イベント
+   ↓
+7. Control Plane → Health Checker: ヘルスチェック登録
+   ↓
+8. Health Checker: 定期チェック開始
+   ↓
+9. Control Plane → User: edge.ready イベント（WebSocket）
+```
 
 ---
 
@@ -760,6 +1167,518 @@ limit_conn addr 10;
 | WireGuard管理 | ✅ 自動 | ✅ 自動 |
 | SSL証明書 | ✅ 自動（Let's Encrypt） | ✅ 自動（Certbot） |
 | 料金 | 月$15〜（Cloud必須） | $0（セルフホスト）+ VPS代 |
+
+---
+
+## モジュラーデプロイ構成例
+
+### 構成1: All-in-One（開発・小規模）
+
+**docker-compose.yml:**
+
+```yaml
+version: '3.8'
+
+services:
+  # Control Plane Core
+  control-plane:
+    image: kokoaproxy/control-plane:latest
+    ports:
+      - "8080:8080"   # Web UI / API
+      - "8081:8081"   # WebSocket
+    environment:
+      DATABASE_URL: postgresql://postgres:password@db:5432/kokoa
+      REDIS_URL: redis://redis:6379
+      # モジュール設定
+      DNS_MANAGER_URL: http://dns-manager:3000
+      EDGE_PROVISIONER_URL: http://edge-provisioner:3000
+      SSL_MANAGER_URL: http://ssl-manager:3000
+      HEALTH_CHECKER_URL: http://health-checker:3000
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - ./config:/etc/kokoa
+
+  # Database
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: kokoa
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+  # Redis (Queue)
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+
+  # DNS Manager Module
+  dns-manager:
+    image: kokoaproxy/dns-manager:latest
+    environment:
+      DNS_PROVIDER: cloudflare
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN}
+      CLOUDFLARE_ZONE_ID: ${CLOUDFLARE_ZONE_ID}
+      CONTROL_PLANE_URL: http://control-plane:8080
+
+  # Edge Provisioner Module
+  edge-provisioner:
+    image: kokoaproxy/edge-provisioner:latest
+    environment:
+      PROVIDER: digitalocean
+      DO_API_TOKEN: ${DO_API_TOKEN}
+      DO_SSH_KEY_ID: ${DO_SSH_KEY_ID}
+      CONTROL_PLANE_URL: http://control-plane:8080
+
+  # SSL Manager Module
+  ssl-manager:
+    image: kokoaproxy/ssl-manager:latest
+    environment:
+      SSL_PROVIDER: letsencrypt
+      ACME_EMAIL: ${ACME_EMAIL}
+      CONTROL_PLANE_URL: http://control-plane:8080
+    volumes:
+      - ssl_certs:/etc/letsencrypt
+
+  # Health Checker Module
+  health-checker:
+    image: kokoaproxy/health-checker:latest
+    environment:
+      CONTROL_PLANE_URL: http://control-plane:8080
+
+volumes:
+  db_data:
+  redis_data:
+  ssl_certs:
+```
+
+**.env:**
+
+```bash
+# Cloudflare (DNS)
+CLOUDFLARE_API_TOKEN=your_cloudflare_token
+CLOUDFLARE_ZONE_ID=your_zone_id
+
+# DigitalOcean (VPS Provisioner)
+DO_API_TOKEN=your_do_token
+DO_SSH_KEY_ID=your_ssh_key_id
+
+# SSL
+ACME_EMAIL=admin@example.com
+```
+
+**起動:**
+
+```bash
+docker-compose up -d
+```
+
+**アクセス:**
+- Web UI: http://localhost:8080
+- API: http://localhost:8080/api/v1
+
+---
+
+### 構成2: 分散デプロイ（本番環境）
+
+**Control Plane:**
+```bash
+# 専用VPS (例: 2GB RAM, 2 vCPU)
+docker run -d \
+  --name kokoa-control-plane \
+  -p 443:8080 \
+  -e DATABASE_URL=postgresql://... \
+  -e DNS_MANAGER_URL=https://dns.internal.example.com \
+  -e EDGE_PROVISIONER_URL=https://provisioner.internal.example.com \
+  kokoaproxy/control-plane:latest
+```
+
+**DNS Manager (別サーバー):**
+```bash
+docker run -d \
+  --name kokoa-dns-manager \
+  -p 3000:3000 \
+  -e DNS_PROVIDER=cloudflare \
+  -e CLOUDFLARE_API_TOKEN=... \
+  kokoaproxy/dns-manager:latest
+```
+
+**Edge Provisioner (別サーバー):**
+```bash
+docker run -d \
+  --name kokoa-edge-provisioner \
+  -p 3000:3000 \
+  -e PROVIDER=digitalocean \
+  -e DO_API_TOKEN=... \
+  kokoaproxy/edge-provisioner:latest
+```
+
+---
+
+### 構成3: Kubernetes デプロイ
+
+**namespace.yaml:**
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kokoa-system
+```
+
+**control-plane-deployment.yaml:**
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-plane
+  namespace: kokoa-system
+spec:
+  replicas: 2  # 冗長化
+  selector:
+    matchLabels:
+      app: control-plane
+  template:
+    metadata:
+      labels:
+        app: control-plane
+    spec:
+      containers:
+      - name: control-plane
+        image: kokoaproxy/control-plane:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: kokoa-secrets
+              key: database_url
+        - name: DNS_MANAGER_URL
+          value: "http://dns-manager.kokoa-system.svc:3000"
+        - name: EDGE_PROVISIONER_URL
+          value: "http://edge-provisioner.kokoa-system.svc:3000"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: control-plane
+  namespace: kokoa-system
+spec:
+  selector:
+    app: control-plane
+  ports:
+  - port: 80
+    targetPort: 8080
+  type: LoadBalancer
+```
+
+**modules-deployment.yaml:**
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dns-manager
+  namespace: kokoa-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dns-manager
+  template:
+    metadata:
+      labels:
+        app: dns-manager
+    spec:
+      containers:
+      - name: dns-manager
+        image: kokoaproxy/dns-manager:latest
+        env:
+        - name: DNS_PROVIDER
+          value: "cloudflare"
+        - name: CLOUDFLARE_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: kokoa-secrets
+              key: cloudflare_token
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dns-manager
+  namespace: kokoa-system
+spec:
+  selector:
+    app: dns-manager
+  ports:
+  - port: 3000
+    targetPort: 3000
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge-provisioner
+  namespace: kokoa-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: edge-provisioner
+  template:
+    metadata:
+      labels:
+        app: edge-provisioner
+    spec:
+      containers:
+      - name: edge-provisioner
+        image: kokoaproxy/edge-provisioner:latest
+        env:
+        - name: PROVIDER
+          value: "digitalocean"
+        - name: DO_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: kokoa-secrets
+              key: do_token
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: edge-provisioner
+  namespace: kokoa-system
+spec:
+  selector:
+    app: edge-provisioner
+  ports:
+  - port: 3000
+    targetPort: 3000
+```
+
+**デプロイ:**
+
+```bash
+kubectl apply -f namespace.yaml
+kubectl apply -f control-plane-deployment.yaml
+kubectl apply -f modules-deployment.yaml
+```
+
+---
+
+## モジュールの有効/無効化
+
+### config.yaml
+
+```yaml
+# Control Plane設定
+control_plane:
+  listen: "0.0.0.0:8080"
+  database: "postgresql://..."
+
+# モジュール設定
+modules:
+  dns_manager:
+    enabled: true
+    url: "http://dns-manager:3000"
+    provider: "cloudflare"
+
+  edge_provisioner:
+    enabled: true
+    url: "http://edge-provisioner:3000"
+    provider: "digitalocean"
+
+  ssl_manager:
+    enabled: true
+    url: "http://ssl-manager:3000"
+    provider: "letsencrypt"
+
+  health_checker:
+    enabled: true
+    url: "http://health-checker:3000"
+
+  metrics_collector:
+    enabled: false  # 無効化
+
+  outbound_router:
+    enabled: false  # 無効化
+```
+
+### モジュールの動的な有効/無効化
+
+**Web UIから:**
+
+```
+Settings > Modules
+
+┌─────────────────────────────────────────────┐
+│ Module Configuration                        │
+├─────────────────────────────────────────────┤
+│                                             │
+│ DNS Manager                  [✓] Enabled   │
+│   Provider: Cloudflare                      │
+│   Status: ✓ Connected                       │
+│   [Configure]                               │
+│                                             │
+│ Edge Provisioner             [✓] Enabled   │
+│   Provider: DigitalOcean                    │
+│   Status: ✓ Connected                       │
+│   [Configure]                               │
+│                                             │
+│ SSL Manager                  [✓] Enabled   │
+│   Provider: Let's Encrypt                   │
+│   Status: ✓ Connected                       │
+│   [Configure]                               │
+│                                             │
+│ Health Checker               [✓] Enabled   │
+│   Status: ✓ Running (10 checks)             │
+│   [Configure]                               │
+│                                             │
+│ Metrics Collector            [ ] Disabled  │
+│   [Enable]                                  │
+│                                             │
+│ Outbound Router              [ ] Disabled  │
+│   [Enable]                                  │
+│                                             │
+└─────────────────────────────────────────────┘
+```
+
+---
+
+## モジュール開発ガイド
+
+### カスタムモジュールの作成
+
+**例: カスタムDNS Provider実装**
+
+```go
+// custom_dns_provider.go
+package main
+
+import (
+    "github.com/kokoa-proxy/module-sdk"
+)
+
+type CustomDNSProvider struct {
+    apiKey string
+}
+
+func (p *CustomDNSProvider) AddRecord(hostname, recordType, value string) error {
+    // カスタムDNS APIを呼び出す
+    return nil
+}
+
+func (p *CustomDNSProvider) RemoveRecord(hostname, recordID string) error {
+    return nil
+}
+
+func (p *CustomDNSProvider) ListRecords(hostname string) ([]DNSRecord, error) {
+    return nil, nil
+}
+
+func main() {
+    provider := &CustomDNSProvider{
+        apiKey: os.Getenv("CUSTOM_DNS_API_KEY"),
+    }
+
+    // モジュールSDKで起動
+    module.Serve(module.Config{
+        Name:     "custom-dns",
+        Version:  "1.0.0",
+        Provider: provider,
+    })
+}
+```
+
+**Dockerfile:**
+
+```dockerfile
+FROM golang:1.21-alpine AS builder
+WORKDIR /app
+COPY . .
+RUN go build -o custom-dns-manager
+
+FROM alpine:3.19
+COPY --from=builder /app/custom-dns-manager /usr/local/bin/
+ENTRYPOINT ["/usr/local/bin/custom-dns-manager"]
+```
+
+**使用:**
+
+```yaml
+# config.yaml
+modules:
+  dns_manager:
+    enabled: true
+    url: "http://custom-dns-manager:3000"
+    provider: "custom"
+```
+
+---
+
+## モジュール間通信の詳細
+
+### イベントバス（Redis Pub/Sub）
+
+**Control Plane → Module (イベント発行):**
+
+```go
+// Control Plane
+redis.Publish("kokoa.events.edge.created", json.Marshal(Event{
+    Type: "edge.created",
+    Data: map[string]interface{}{
+        "edge_node_id": "uuid",
+        "public_ip": "203.0.113.10",
+    },
+}))
+```
+
+**Module → Control Plane (イベント購読):**
+
+```go
+// DNS Manager Module
+sub := redis.Subscribe("kokoa.events.edge.created")
+
+for msg := range sub.Channel() {
+    var event Event
+    json.Unmarshal([]byte(msg.Payload), &event)
+
+    // DNS レコード追加
+    err := dnsProvider.AddRecord(
+        event.Data["hostname"],
+        "A",
+        event.Data["public_ip"],
+    )
+
+    // 結果をControl Planeに報告
+    redis.Publish("kokoa.events.dns.record.added", ...)
+}
+```
+
+### REST API（モジュール → Control Plane）
+
+```go
+// Module側
+resp, err := http.Post(
+    controlPlaneURL + "/api/v1/internal/events",
+    "application/json",
+    json.Marshal(Event{
+        Type: "dns.record.added",
+        Data: map[string]interface{}{
+            "record_id": "xyz",
+            "hostname": "app.example.com",
+        },
+    }),
+)
+```
 
 ---
 
