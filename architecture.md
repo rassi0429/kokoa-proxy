@@ -12,39 +12,118 @@ Cloudflare Tunnelのような体験を、モジュラーかつセルフホスト
 
 ---
 
+## 3つの主要な登場人物
+
+### 1. Control Plane（コントロールプレーン）
+**何者？** 管理・オーケストレーション役
+- Web UI/APIを提供
+- EdgeとOriginを管理
+- モジュール群を含む（DNS管理、VPS作成、SSL管理など）
+
+**配置:** 信頼できるVPS or 自宅
+**役割:** すべての指示を出す司令塔
+
+---
+
+### 2. Edge Node（エッジノード）
+**何者？** インターネット側の入口（使い捨てVPS）
+- ユーザーからのリクエストを受け付ける
+- WireGuardでOriginに転送
+- SSL終端、DDoS対策
+
+**配置:** 複数のVPS（DigitalOcean、Vultr等）
+**役割:** 防弾盾、攻撃を受けたら即破棄
+
+---
+
+### 3. Origin（オリジン/各ホスト）
+**何者？** 実際のサービスが動いているホスト
+- 自宅サーバー、VM、K8s、Docker等
+- WireGuardでEdgeからの接続を受け入れ
+- 実際のアプリケーションを実行
+
+**配置:** 自宅、プライベートネットワーク
+**役割:** 保護されたバックエンド
+
+---
+
 ## アーキテクチャ概要図
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     Control Plane Core                      │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
-│  │   Web UI     │  │   REST API   │  │  WebSocket   │      │
-│  └──────────────┘  └──────────────┘  └──────────────┘      │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │            Router & Orchestrator                     │  │
-│  └──────────────────────────────────────────────────────┘  │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │            Database (PostgreSQL/SQLite)              │  │
-│  └──────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-                            ↕ API
-┌─────────────────────────────────────────────────────────────┐
-│                      モジュール層                            │
-├──────────────┬──────────────┬──────────────┬──────────────┤
-│ DNS Manager  │ Edge Prov.   │ SSL Manager  │ Health Check │
-│ Module       │ Module       │ Module       │ Module       │
-│              │              │              │              │
-│ [Cloudflare] │ [DigitalOcn] │ [ACME/LE]   │ [HTTP/TCP]   │
-│ [Route53]    │ [Vultr]      │ [Cloudflare] │ [Custom]     │
-│ [PowerDNS]   │ [Manual]     │ [Manual]     │              │
-└──────────────┴──────────────┴──────────────┴──────────────┘
-                            ↕
-┌─────────────────────────────────────────────────────────────┐
-│                    Infrastructure Layer                     │
-├──────────────┬──────────────┬──────────────────────────────┤
-│ Edge Nodes   │ Origin Nodes │ External Services            │
-│ (VPS)        │ (自宅/K8s)    │ (DNS/VPS APIs)               │
-└──────────────┴──────────────┴──────────────────────────────┘
+        ┌──────────────────────────────────────┐
+        │         インターネットユーザー          │
+        └────────────────┬─────────────────────┘
+                         │ HTTPS
+              ┌──────────┴──────────┐
+              │                     │
+              v                     v
+    ┌─────────────────┐   ┌─────────────────┐
+    │  Edge Node #1   │   │  Edge Node #2   │  ← 登場人物②
+    │  (VPS/使い捨て)  │   │  (VPS/使い捨て)  │
+    │  - Nginx        │   │  - Nginx        │
+    │  - WG Client    │   │  - WG Client    │
+    └────────┬────────┘   └────────┬────────┘
+             │ WireGuard Tunnel    │
+             │  (暗号化)            │
+             └─────────┬────────────┘
+                       │
+                       v
+            ┌──────────────────────┐
+            │   Origin (自宅等)     │  ← 登場人物③
+            │  - WG Server         │
+            │  - K8s/Docker/VM     │
+            │  - 実際のアプリ       │
+            └──────────────────────┘
+
+
+    ┌──────────────────────────────────────────┐
+    │      Control Plane (管理サーバー)         │  ← 登場人物①
+    │  ┌────────────────────────────────────┐  │
+    │  │  Web UI / API                      │  │
+    │  └────────────────────────────────────┘  │
+    │  ┌────────────────────────────────────┐  │
+    │  │  モジュール群（Control Planeの一部）│  │
+    │  │  ├─ DNS Manager                    │  │
+    │  │  ├─ Edge Provisioner               │  │
+    │  │  ├─ SSL Manager                    │  │
+    │  │  └─ Health Checker                 │  │
+    │  └────────────────────────────────────┘  │
+    │  ┌────────────────────────────────────┐  │
+    │  │  Database                          │  │
+    │  └────────────────────────────────────┘  │
+    └──────────────────────────────────────────┘
+              │           │           │
+              v           v           v
+         Edge管理   Origin管理    DNS/VPS API
+```
+
+**重要:** モジュール（DNS Manager等）は独立した「登場人物」ではなく、Control Planeの機能を分離したもの。Control Planeの一部として動作します。
+
+---
+
+## トラフィックフロー（シンプル版）
+
+```
+【Inbound（外部→サービス）】
+ユーザー
+  → Edge Node（VPS、203.0.113.10）
+    → WireGuardトンネル
+      → Origin（自宅、10.0.0.1）
+        → アプリ（ポート3000）
+
+【Outbound（サービス→外部）】※オプション
+アプリ（ポート3000）
+  → Origin（10.0.0.1）
+    → WireGuardトンネル
+      → Edge Node（10.0.0.10）
+        → インターネット（203.0.113.10から出る）
+
+【管理】
+管理者
+  → Control Plane（Web UI）
+    → Edge Node作成指示
+    → Origin登録
+    → ルーティング設定
 ```
 
 ---
@@ -1104,6 +1183,236 @@ limit_conn addr 10;
 - ヘルスチェック失敗時の自動DNS除外
 - 異常トラフィック検知（閾値設定）
 - 自動ノード交換スクリプト
+
+---
+
+### 5. Origin間の通信分離（重要！）
+
+**問題:**
+複数のOriginが同じWireGuardネットワーク（例: 10.0.0.0/24）にいると、Origin同士が通信できてしまう。
+
+```
+❌ 危険な構成:
+Origin A (10.0.0.1) ←→ Origin B (10.0.0.2)  # 直接通信可能！
+```
+
+**解決策1: 各Originごとに独立したネットワーク（推奨）**
+
+各Originに専用のサブネットを割り当て、完全に分離します。
+
+```
+✅ 安全な構成:
+Origin A: 10.0.1.0/24
+  └─ Origin A自身: 10.0.1.1
+  └─ Edge Node 1: 10.0.1.10
+  └─ Edge Node 2: 10.0.1.11
+
+Origin B: 10.0.2.0/24
+  └─ Origin B自身: 10.0.2.1
+  └─ Edge Node 1: 10.0.2.10
+  └─ Edge Node 2: 10.0.2.11
+```
+
+**Origin Aの設定:**
+```bash
+# /etc/wireguard/wg0.conf
+[Interface]
+Address = 10.0.1.1/24
+PrivateKey = <origin_a_private_key>
+ListenPort = 51820
+
+# Edge Node 1（Origin A専用IP）
+[Peer]
+PublicKey = <edge_node_1_public_key>
+AllowedIPs = 10.0.1.10/32
+
+# Edge Node 2（Origin A専用IP）
+[Peer]
+PublicKey = <edge_node_2_public_key>
+AllowedIPs = 10.0.1.11/32
+```
+
+**Origin Bの設定:**
+```bash
+# /etc/wireguard/wg0.conf
+[Interface]
+Address = 10.0.2.1/24
+PrivateKey = <origin_b_private_key>
+ListenPort = 51820
+
+# Edge Node 1（Origin B専用IP）
+[Peer]
+PublicKey = <edge_node_1_public_key>
+AllowedIPs = 10.0.2.10/32
+
+# Edge Node 2（Origin B専用IP）
+[Peer]
+PublicKey = <edge_node_2_public_key>
+AllowedIPs = 10.0.2.11/32
+```
+
+**Edge Nodeの設定（複数WireGuardインターフェース）:**
+```bash
+# Edge Node 1
+
+# Origin A用トンネル
+# /etc/wireguard/wg-origin-a.conf
+[Interface]
+Address = 10.0.1.10/24
+PrivateKey = <edge_private_key_a>
+ListenPort = 51820
+
+[Peer]
+PublicKey = <origin_a_public_key>
+Endpoint = origin-a.example.com:51820
+AllowedIPs = 10.0.1.1/32
+PersistentKeepalive = 25
+
+# Origin B用トンネル
+# /etc/wireguard/wg-origin-b.conf
+[Interface]
+Address = 10.0.2.10/24
+PrivateKey = <edge_private_key_b>
+ListenPort = 51821  # 異なるポート
+
+[Peer]
+PublicKey = <origin_b_public_key>
+Endpoint = origin-b.example.com:51820
+AllowedIPs = 10.0.2.1/32
+PersistentKeepalive = 25
+```
+
+**Nginx設定（Origin別にupstream）:**
+```nginx
+# Origin A用
+upstream origin_a {
+    server 10.0.1.1:80;
+}
+
+server {
+    listen 443 ssl;
+    server_name app-a.example.com;
+
+    location / {
+        proxy_pass http://origin_a;
+    }
+}
+
+# Origin B用
+upstream origin_b {
+    server 10.0.2.1:80;
+}
+
+server {
+    listen 443 ssl;
+    server_name app-b.example.com;
+
+    location / {
+        proxy_pass http://origin_b;
+    }
+}
+```
+
+---
+
+**解決策2: AllowedIPsで厳密に制限**
+
+同じネットワーク（10.0.0.0/24）でも、AllowedIPsで制限。
+
+```bash
+# Origin A (/etc/wireguard/wg0.conf)
+[Interface]
+Address = 10.0.0.1/24
+
+# Edge Node 1からのトラフィックのみ許可
+[Peer]
+PublicKey = <edge_node_1_public_key>
+AllowedIPs = 10.0.0.10/32  # Origin Bの10.0.0.2は含まれない
+
+# Edge Node 2からのトラフィックのみ許可
+[Peer]
+PublicKey = <edge_node_2_public_key>
+AllowedIPs = 10.0.0.11/32
+```
+
+**iptablesで追加制御:**
+```bash
+# Origin A側で、他のOriginへの通信をブロック
+iptables -A OUTPUT -d 10.0.0.2/32 -j DROP  # Origin Bへの通信を拒否
+iptables -A OUTPUT -d 10.0.0.3/32 -j DROP  # Origin Cへの通信を拒否
+```
+
+**⚠️ 注意:**
+この方法は設定ミスのリスクがあるため、**解決策1（独立ネットワーク）を強く推奨**。
+
+---
+
+**解決策3: WireGuard以外の分離手段**
+
+より複雑ですが、完全分離を保証：
+
+```
+各Originが個別のWireGuardサーバーを持ち、
+Edge Nodeが複数のWireGuardクライアントを動かす。
+
+Origin A ←→ wg0 ←→ Edge Node
+Origin B ←→ wg1 ←→ Edge Node
+Origin C ←→ wg2 ←→ Edge Node
+```
+
+---
+
+**データモデルへの反映:**
+
+```sql
+-- origins テーブルに network_cidr を追加
+ALTER TABLE origins ADD COLUMN network_cidr VARCHAR(18) NOT NULL DEFAULT '10.0.0.0/24';
+
+-- 例:
+-- Origin A: 10.0.1.0/24
+-- Origin B: 10.0.2.0/24
+-- Origin C: 10.0.3.0/24
+
+-- IP割り当てロジック
+-- Control Planeが自動的に未使用のサブネットを割り当て
+```
+
+**Control Planeの自動割り当て:**
+
+```python
+def allocate_origin_network():
+    # 既存のOriginが使用しているサブネットを取得
+    used_subnets = db.query("SELECT network_cidr FROM origins")
+
+    # 10.0.1.0/24, 10.0.2.0/24, ... から未使用のものを探す
+    for i in range(1, 255):
+        candidate = f"10.0.{i}.0/24"
+        if candidate not in used_subnets:
+            return candidate
+
+    raise Exception("No available subnets")
+
+# 新しいOrigin作成時
+new_origin = {
+    "name": "origin-d",
+    "network_cidr": allocate_origin_network(),  # "10.0.4.0/24"
+    "wireguard_ip": "10.0.4.1",
+}
+```
+
+---
+
+**推奨構成まとめ:**
+
+| 項目 | 推奨 |
+|------|------|
+| **ネットワーク分離** | ✅ 各Originに独立したサブネット（10.0.X.0/24） |
+| **Edge Node構成** | ✅ 複数WireGuardインターフェース（wg-origin-a, wg-origin-b...） |
+| **AllowedIPs** | ✅ 厳密に制限（Origin自身のIPのみ） |
+| **iptables** | ✅ 追加の防御層として設定 |
+| **監視** | ✅ 異常な通信パターンを検知 |
+
+これにより、**Origin同士が完全に分離**され、マルチテナント環境でも安全に運用できます。
 
 ---
 
