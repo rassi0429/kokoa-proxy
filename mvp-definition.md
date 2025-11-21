@@ -1,209 +1,191 @@
-# MVP（Minimal Viable Product）定義の詳細化
+# MVP（Minimal Viable Product）定義の詳細化 (マルチサブドメイン対応版)
 
-`architecture.md`で定義されたMVPフェーズを、より具体的で実行可能なステップに掘り下げて定義します。
+`architecture.md`で定義された、より柔軟な「マルチサブドメイン対応」および「プル型設定取得」モデルに基づき、MVPの具体的で実行可能なステップを再定義します。
 
 ## 1. 主要な登場人物
 
 このプロジェクトには、以下の3つの主要なコンポーネントがあります。
 
 ### 1.1. Control Plane（コントロールプレーン）
-- **役割**: システム全体の管理、オーケストレーション、設定の生成と配布、監視を行う司令塔。ユーザーからのリクエストは直接処理せず、データプレーンには関与しません。
-- **MVPでの実装範囲**: Web UI/APIの提供、Origin/Edge Nodeの登録管理、WireGuard/Nginx設定生成、基本的なヘルスチェック、手動DNS更新CLIツールとの連携。
+- **役割**: システム全体の管理、オーケストレーションを行う司令塔。
+- **MVPでの実装範囲**:
+  - OriginとRouteを管理するための基本的なWeb UIとAPI。
+  - Edge Nodeからの設定取得リクエストに応答するAPI。
+  - Nginxの`map`設定と、Edge Nodeが管理すべきホスト名リストを動的に生成する機能。
 
 ### 1.2. Edge Node（エッジノード）
-- **役割**: インターネットからのユーザーリクエストを受け付ける最前線のノード。WireGuardトンネルを通じてOriginにトラフィックを転送し、SSL終端やDDoS軽減（Nginxのレートリミットなど）を行います。攻撃を受けた際に破棄・再構築される使い捨てのコンポーネントです。
-- **MVPでの実装範囲**: WireGuardクライアントとしてOriginに接続、Nginxによるリバースプロキシ設定の適用、SSL証明書（Let's Encrypt）の取得と更新。
+- **役割**: インターネットからのリクエストを受け付ける、動的なリバースプロキシ。
+- **MVPでの実装範囲**:
+  - `kokoa-edge-agent`: 定期的にControl Planeに設定を問い合わせるシンプルなエージェント（cronで実行するシェルスクリプトで実装）。
+  - 受信した設定に基づき、Nginxの`map`ファイルを更新し、Nginxをリロードする機能。
+  - 受信したホスト名リストに基づき、`certbot`を実行してSSL証明書を個別に取得・管理する機能。
 
-### 1.3. Origin（オリジン/各ホスト）
-- **役割**: 実際のWebサービスやアプリケーションが動作するバックエンドホスト。Edge NodeからのWireGuardトンネル接続を受け入れ、保護された環境でアプリケーションを実行します。
-- **MVPでの実装範囲**: WireGuardサーバーとしてEdge Nodeからの接続を受け入れ、アプリケーション（例: 開発用Webサーバー）へのトラフィックを転送。
+### 1.3. Origin（オリジン）
+- **役割**: 実際のWebサービスが動作するバックエンドホスト。
+- **MVPでの実装範囲**: WireGuardサーバーとしてEdge Nodeからの接続を受け入れる。
 
 ---
 
 ## 2. プロジェクトの土台作り（Control Plane）
 
-### 2.1. ディレクトリ構造
-
-まず、Control Planeの基本的なディレクトリ構造を定義します。技術スタックはGoを想定します。
+### 2.1. ディレクトリ構造（変更なし）
+Goを想定した基本的なディレクトリ構造。
 
 ```
 /kokoa-proxy
 ├── control-plane/
-│   ├── cmd/
-│   │   └── kokoa-cp/
-│   │       └── main.go       # メインアプリケーションのエントリポイント
+│   ├── cmd/kokoa-cp/main.go
 │   ├── internal/
-│   │   ├── api/              # APIハンドラ、ルーティング
-│   │   ├── config/           # 設定ファイルの読み込み
-│   │   ├── db/               # データベース（SQLite）のセットアップ、クエリ
-│   │   ├── generator/        # WireGuard/Nginx設定生成
-│   │   ├── model/            # データモデル（Origin, EdgeNode）
-│   │   └── web/              # Web UIの静的ファイル（HTML, CSS, JS）
+│   │   ├── api/
+│   │   ├── db/
+│   │   ├── generator/
+│   │   └── web/
 │   ├── go.mod
-│   ├── go.sum
 │   └── Dockerfile
-├── scripts/                  # CLIツールや補助スクリプト
-│   └── kokoa-dns/
+├── scripts/
+│   ├── kokoa-dns/
+│   └── kokoa-edge-agent/
 └── docker-compose.yml
 ```
 
-### 2.2. 初期セットアップ
+### 2.2. 初期セットアップ（変更なし）
+- `go mod init` を実行し、基本的なWebサーバーを実装。
 
-- `go mod init github.com/your-username/kokoa-proxy/control-plane` を実行
-- `main.go`に基本的なWebサーバー（`net/http`）を実装
+---
 
 ## 3. Control Plane - コア機能
 
-### 3.1. 最小DBスキーマ
-
-MVPでは、SQLiteを使用してシンプルに保ちます。`control-plane/internal/db/schema.sql`を作成します。
+### 3.1. 最小DBスキーマ (更新)
 
 ```sql
+-- オリジンサーバー（単なるWireGuardピア）
 CREATE TABLE IF NOT EXISTS origins (
     id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    -- "domain" は app.example.com のような完全なホスト名を格納
-    domain TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL UNIQUE,
     wireguard_ip TEXT NOT NULL UNIQUE,
     wireguard_public_key TEXT NOT NULL,
     wireguard_private_key_encrypted TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
 
+-- ルート（ホスト名とバックエンドサービスの紐付け）
+CREATE TABLE IF NOT EXISTS routes (
+  id TEXT PRIMARY KEY,
+  hostname TEXT NOT NULL UNIQUE,
+  origin_id TEXT NOT NULL,
+  target_port INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY(origin_id) REFERENCES origins(id)
+);
+
+-- エッジノード
 CREATE TABLE IF NOT EXISTS edge_nodes (
     id TEXT PRIMARY KEY,
-    origin_id TEXT NOT NULL,
     name TEXT NOT NULL,
-    public_ip TEXT NOT NULL UNIQUE,
-    wireguard_ip TEXT NOT NULL UNIQUE,
-    wireguard_public_key TEXT NOT NULL,
-    wireguard_private_key_encrypted TEXT NOT NULL,
-    health_status TEXT NOT NULL DEFAULT 'unknown', -- "unknown", "healthy", "unhealthy"
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY(origin_id) REFERENCES origins(id)
+    auth_token_hash TEXT NOT NULL UNIQUE, -- 永続的な認証トークン
+    last_seen INTEGER
 );
 ```
 
-### 3.2. 最小APIエンドポイント
+### 3.2. 最小APIエンドポイント (更新)
 
-`internal/api/handlers.go`に以下のハンドラを実装します。
+- **`POST /api/v1/origins`**: Originを登録（`domain`フィールドは不要に）。
+- **`POST /api/v1/routes`**: ホスト名、Origin、転送先ポートを紐付けるルートを作成。
+- **`POST /api/v1/edge-nodes/register`**: Edge Nodeが初回起動時に自身を登録し、永続的な認証トークンを取得。
+- **`GET /api/v1/edge-nodes/me/config`**: Edge Nodeが認証トークンを使い、自身の動的な設定（Nginxの`map`情報、ホスト名リスト）を取得。
 
-- **`POST /api/v1/origins`**
-  - リクエストボディ: `{"name": "my-origin", "domain": "app.example.com"}`
-  - 処理:
-    1. WireGuard鍵ペア生成
-    2. `10.100.X.1`形式のWireGuard IPを割り当て
-    3. DBにOriginを保存（`domain`には完全なホスト名を格納）
-  - レスポンス: `201 Created`
+### 3.3. 最小Web UI (更新)
 
-- **`POST /api/v1/origins/{id}/edge-nodes`**
-  - リクエストボディ: `{"name": "my-edge", "public_ip": "1.2.3.4"}`
-  - 処理:
-    1. WireGuard鍵ペア生成
-    2. `10.100.X.10-254`形式のWireGuard IPを割り当て
-    3. DBにEdgeNodeを保存
-  - レスポンス: `201 Created`
+- Origin登録フォーム（名前のみ）。
+- Route登録フォーム（ホスト名、Origin選択、ポート番号）。
+- 登録済みのOriginとRouteの一覧表示。
 
-- **`GET /api/v1/origins/{id}/config-bundle`**
-  - 処理:
-    1. DBからOriginと関連する全EdgeNodeを取得
-    2. WireGuard設定ファイル（`wg0.conf`）を生成
-    3. インストールスクリプト（`install.sh`）を生成
-    4. これらを `.tar.gz` 形式で圧縮
-  - レスポンス: `200 OK` (Content-Type: `application/gzip`)
+---
 
-- **`GET /api/v1/edge-nodes/{id}/config-bundle`**
-  - 処理:
-    1. DBからEdgeNodeと関連するOriginを取得
-    2. WireGuard設定ファイル（`wg-origin-X.conf`）を生成
-    3. Nginx設定ファイル（`nginx.conf`）を生成
-    4. インストールスクリプト（`install.sh`）を生成
-    5. これらを `.tar.gz` 形式で圧縮
-  - レスポンス: `200 OK` (Content-Type: `application/gzip`)
+## 4. 設定ファイルの自動生成 (更新)
 
-### 3.3. 最小Web UI
+### 4.1. Nginx `map` 設定生成 (`generator/nginx.go`)
 
-`internal/web/` に単一の `index.html` を作成します。
+- `GenerateNginxMapConfig(routes)`: DBの全ルート情報を元に、`map $host $kokoa_backend`ディレクティブを含む設定ファイルを生成する。
 
-- **機能**:
-  - Origin登録フォーム（名前, 完全なホスト名 `app.example.com`）
-  - Edge Node登録フォーム（Origin選択, 名前, Public IP）
-  - 登録済みのOriginとEdge Nodeの一覧表示（名前, ホスト名, IP, ヘルスステータス）
-  - 各ノードの設定バンドルをダウンロードするリンク
-- **実装**:
-  - シンプルなHTMLとCSS（フレームワーク不要）
-  - JavaScript (`fetch` API) でControl PlaneのAPIを呼び出す
+---
 
-## 4. 設定ファイルの自動生成
+## 5. Edge Node エージェント (`scripts/kokoa-edge-agent/`)
 
-`internal/generator/` に実装します。
+MVPでは、cronで定期的に実行されるシェルスクリプトとして実装。
 
-### 4.1. WireGuard設定 (`wg.go`)
+**`poll_config.sh`**:
+```bash
+#!/bin/bash
+CONTROL_PLANE_URL="https://control.example.com"
+NODE_TOKEN="<this-node-persistent-token>" # 初回登録時に取得・保存
+CONFIG_DIR="/etc/kokoa-edge"
 
-- `GenerateOriginConfig(origin, edgeNodes)`: Origin用の`wg0.conf`を生成
-- `GenerateEdgeNodeConfig(edgeNode, origin)`: Edge Node用の`wg-origin-X.conf`を生成
+# 1. Control Planeから設定を取得
+CONFIG_JSON=$(curl -s -H "Authorization: Bearer $NODE_TOKEN" "$CONTROL_PLANE_URL/api/v1/edge-nodes/me/config")
 
-### 4.2. Nginx設定 (`nginx.go`)
+# 2. Nginxのmapファイルを生成・更新
+echo "$CONFIG_JSON" | jq -r '.routes | to_entries | map("    \"\(.key)\" \"\(.value)\";") | .[]' | \
+  (echo "map \$host \$kokoa_backend {"; cat; echo "}") > "$CONFIG_DIR/kokoa-map.conf"
 
-- `GenerateNginxConfig(edgeNode, origin)`: Edge Node用の`nginx.conf`を生成
-  - `server_name` は Origin の `domain` フィールド（`app.example.com`）を使用
-  - `proxy_pass` は Origin のWireGuard IPアドレス（例: `http://10.100.0.1`）
-  - SSL証明書パスは `/etc/letsencrypt/live/<app.example.com>/...` のように動的に設定
+# Nginx設定をリロード
+nginx -s reload
 
-## 5. 基本的なヘルスチェック
+# 3. SSL証明書を管理
+HOSTNAMES=$(echo "$CONFIG_JSON" | jq -r '.hostnames[]')
+EMAIL="admin@example.com"
 
-- `internal/health/` に実装
-- `StartChecker()`:
-  - 30秒ごとにDBから全EdgeNodeとOriginを取得
-  - Goルーチンで各ノードのWireGuard IPに `ping` を実行
-  - 結果（"healthy", "unhealthy"）をDBの `health_status` カラムに更新
-  - Pingが失敗した場合でも、MVPでは自動アクションは行わない
+for HOST in $HOSTNAMES; do
+  if [ ! -f "/etc/letsencrypt/live/$HOST/fullchain.pem" ]; then
+    echo "Obtaining certificate for $HOST..."
+    certbot --nginx -d "$HOST" --non-interactive --agree-tos -m "$EMAIL"
+  fi
+done
+```
 
-## 6. 手動DNS更新CLIツール
+---
 
-`scripts/kokoa-dns/` にGoで実装します。
+## 6. 手動DNS更新CLIツール (`scripts/kokoa-dns/`)
 
-- **`main.go`**: `cobra` や `flag` パッケージでCLIを実装
-- **環境変数**: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ZONE_ID` を読み込む
-- **コマンド**:
-  - `kokoa-dns list --name <subdomain>`: 指定されたサブドメインのAレコードを一覧表示します。（例: `--name app`）
-  - `kokoa-dns add --name <subdomain> --ip <ip_address>`: 指定されたサブドメインに、IPアドレスのAレコードを追加します。
-  - `kokoa-dns remove --name <subdomain> --ip <ip_address>`: 指定されたサブドメインのAレコードの中から、IPアドレスに一致するレコードを削除します。
+CLIツールの仕様は前回定義したもの（`--name`フラグでサブドメインを指定）で問題ありません。
+
+- `kokoa-dns add --name app1 --ip <ip_address>`
+- `kokoa-dns add --name app2 --ip <ip_address>`
+
+---
 
 ## 7. インストール/セットアップスクリプト
 
-- **`install-origin.sh`**
-  ```bash
-  #!/bin/bash
-  set -e
-  echo "Installing Kokoa Origin..."
-  # WireGuardインストール
-  apt-get update && apt-get install -y wireguard
-  # 設定ファイル配置
-  cp ./wg0.conf /etc/wireguard/wg0.conf
-  # サービス起動
-  systemctl enable wg-quick@wg0
-  systemctl restart wg-quick@wg0
-  echo "✅ Kokoa Origin installed."
-  ```
+### `install-edge.sh` (更新)
+このスクリプトは、VPSの初回起動時に一度だけ実行されることを想定します。
 
-- **`install-edge.sh`**
-  ```bash
-  #!/bin/bash
-  set -e
-  DOMAIN="<domain_from_config>" # app.example.com が入る
-  EMAIL="<admin_email_placeholder>"
-  echo "Installing Kokoa Edge Node..."
-  # Nginx, WireGuard, Certbotインストール
-  apt-get update && apt-get install -y wireguard nginx certbot python3-certbot-nginx
-  # 設定ファイル配置
-  cp ./nginx.conf /etc/nginx/sites-available/default
-  cp ./wg-origin-*.conf /etc/wireguard/
-  # SSL証明書取得
-  certbot --nginx -d $DOMAIN --non-interactive --agree-tos -m $EMAIL
-  # サービス起動
-  systemctl enable wg-quick@wg-origin-X
-  systemctl restart wg-quick@wg-origin-X
-  systemctl restart nginx
-  echo "✅ Kokoa Edge Node installed."
-  ```
+```bash
+#!/bin/bash
+set -e
+
+CONTROL_PLANE_URL="https://control.example.com"
+BOOTSTRAP_TOKEN="<one-time-bootstrap-token>"
+
+# 必要なパッケージをインストール
+apt-get update && apt-get install -y wireguard nginx certbot python3-certbot-nginx jq curl
+
+# エージェントスクリプトを配置
+mkdir -p /opt/kokoa
+cat << 'EOF' > /opt/kokoa/poll_config.sh
+# --- 上記の poll_config.sh の内容をここに挿入 ---
+EOF
+chmod +x /opt/kokoa/poll_config.sh
+
+# Control Planeに初回登録して永続トークンを取得
+PERSISTENT_TOKEN=$(curl -s -d "{"bootstrap_token": "$BOOTSTRAP_TOKEN"}" "$CONTROL_PLANE_URL/api/v1/edge-nodes/register" | jq -r .auth_token)
+
+# 永続トークンをスクリプトに埋め込む
+sed -i "s|<this-node-persistent-token>|$PERSISTENT_TOKEN|" /opt/kokoa/poll_config.sh
+
+# cronジョブを設定（例: 1分ごとに実行）
+echo "* * * * * root /opt/kokoa/poll_config.sh" > /etc/cron.d/kokoa-edge-agent
+
+# 初回実行
+/opt/kokoa/poll_config.sh
+```
+*`install-origin.sh`は前回定義から大きな変更はありません。*
