@@ -62,6 +62,7 @@ MVPでは、SQLiteを使用してシンプルに保ちます。`control-plane/in
 CREATE TABLE IF NOT EXISTS origins (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
+    -- "domain" は app.example.com のような完全なホスト名を格納
     domain TEXT NOT NULL UNIQUE,
     wireguard_ip TEXT NOT NULL UNIQUE,
     wireguard_public_key TEXT NOT NULL,
@@ -88,11 +89,11 @@ CREATE TABLE IF NOT EXISTS edge_nodes (
 `internal/api/handlers.go`に以下のハンドラを実装します。
 
 - **`POST /api/v1/origins`**
-  - リクエストボディ: `{"name": "my-origin", "domain": "example.com"}`
+  - リクエストボディ: `{"name": "my-origin", "domain": "app.example.com"}`
   - 処理:
     1. WireGuard鍵ペア生成
     2. `10.100.X.1`形式のWireGuard IPを割り当て
-    3. DBにOriginを保存
+    3. DBにOriginを保存（`domain`には完全なホスト名を格納）
   - レスポンス: `201 Created`
 
 - **`POST /api/v1/origins/{id}/edge-nodes`**
@@ -125,9 +126,9 @@ CREATE TABLE IF NOT EXISTS edge_nodes (
 `internal/web/` に単一の `index.html` を作成します。
 
 - **機能**:
-  - Origin登録フォーム（名前, ドメイン）
+  - Origin登録フォーム（名前, 完全なホスト名 `app.example.com`）
   - Edge Node登録フォーム（Origin選択, 名前, Public IP）
-  - 登録済みのOriginとEdge Nodeの一覧表示（名前, ドメイン, IP, ヘルスステータス）
+  - 登録済みのOriginとEdge Nodeの一覧表示（名前, ホスト名, IP, ヘルスステータス）
   - 各ノードの設定バンドルをダウンロードするリンク
 - **実装**:
   - シンプルなHTMLとCSS（フレームワーク不要）
@@ -145,9 +146,9 @@ CREATE TABLE IF NOT EXISTS edge_nodes (
 ### 4.2. Nginx設定 (`nginx.go`)
 
 - `GenerateNginxConfig(edgeNode, origin)`: Edge Node用の`nginx.conf`を生成
-  - `server_name` は Origin のドメインを使用
+  - `server_name` は Origin の `domain` フィールド（`app.example.com`）を使用
   - `proxy_pass` は Origin のWireGuard IPアドレス（例: `http://10.100.0.1`）
-  - SSL証明書パスは `/etc/letsencrypt/live/<domain>/...` の固定パス
+  - SSL証明書パスは `/etc/letsencrypt/live/<app.example.com>/...` のように動的に設定
 
 ## 5. 基本的なヘルスチェック
 
@@ -165,9 +166,9 @@ CREATE TABLE IF NOT EXISTS edge_nodes (
 - **`main.go`**: `cobra` や `flag` パッケージでCLIを実装
 - **環境変数**: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ZONE_ID` を読み込む
 - **コマンド**:
-  - `kokoa-dns list`: ドメインのAレコードを一覧表示
-  - `kokoa-dns add --ip <ip_address>`: Aレコードを追加
-  - `kokoa-dns remove --ip <ip_address>`: IPアドレスに一致するAレコードを削除
+  - `kokoa-dns list --name <subdomain>`: 指定されたサブドメインのAレコードを一覧表示します。（例: `--name app`）
+  - `kokoa-dns add --name <subdomain> --ip <ip_address>`: 指定されたサブドメインに、IPアドレスのAレコードを追加します。
+  - `kokoa-dns remove --name <subdomain> --ip <ip_address>`: 指定されたサブドメインのAレコードの中から、IPアドレスに一致するレコードを削除します。
 
 ## 7. インストール/セットアップスクリプト
 
@@ -190,7 +191,7 @@ CREATE TABLE IF NOT EXISTS edge_nodes (
   ```bash
   #!/bin/bash
   set -e
-  DOMAIN="<domain_from_config>"
+  DOMAIN="<domain_from_config>" # app.example.com が入る
   EMAIL="<admin_email_placeholder>"
   echo "Installing Kokoa Edge Node..."
   # Nginx, WireGuard, Certbotインストール

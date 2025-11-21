@@ -54,6 +54,7 @@
 
 ---
 
+
 ### 2. Firezone
 **概要**: WireGuardベースのゼロトラストVPN
 
@@ -68,6 +69,7 @@
 **結論**: 現時点では不安定
 
 ---
+
 
 ### 3. Wiredoor
 **概要**: セルフホストIngress-as-a-Serviceプラットフォーム
@@ -86,6 +88,7 @@
 
 ---
 
+
 ### 4. Netmaker
 **概要**: WireGuardベースのメッシュネットワークプラットフォーム
 
@@ -102,6 +105,7 @@
 
 ---
 
+
 ### 5. NetBird
 **概要**: Tailscaleのセルフホスト代替
 
@@ -117,6 +121,7 @@
 **結論**: メッシュVPNとしては優秀だが、今回の用途には適さない
 
 ---
+
 
 ### 6. Headscale
 **概要**: Tailscaleのコントロールサーバーのオープンソース実装
@@ -139,7 +144,7 @@
 
 ```
 [ユーザー]
-    ↓ DNS (GeoDNS/Round Robin)
+    ↓ DNS (GeoDNS/Round Robin for app.yourdomain.com)
     
 【Layer 1: 使い捨て入口ノード (VPS)】
 [VPS #1 - Nginx + WireGuard Client] ← メイン
@@ -196,10 +201,10 @@ upstream backend {
 server {
     listen 80;
     listen 443 ssl http2;
-    server_name *.yourdomain.com;
+    server_name app.yourdomain.com;
     
-    ssl_certificate /etc/letsencrypt/live/yourdomain.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/yourdomain.com/privkey.pem;
+    ssl_certificate /etc/letsencrypt/live/app.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/app.yourdomain.com/privkey.pem;
     
     # DDoS軽減（アプリケーションレイヤー / Layer 7）
     # ⚠️ 注意: これは小規模〜中規模の攻撃にのみ有効
@@ -231,6 +236,7 @@ server {
 ```
 
 ---
+
 
 ### 2. 自宅サーバー側（オリジン）
 
@@ -278,6 +284,7 @@ server {
 
 ---
 
+
 ### 3. DNS自動フェイルオーバー
 
 #### オプション1: PowerDNS + Health Check
@@ -293,10 +300,11 @@ curl -X DELETE "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records/$VP
 # 新しいVPSを追加
 curl -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records" \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{"type":"A","name":"@","content":"新しいIP"}'
+  -d '{"type":"A","name":"app","content":"新しいIP"}'
 ```
 
 ---
+
 
 ### 4. VPS自動作成・破棄スクリプト
 
@@ -306,6 +314,7 @@ curl -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records" \
 
 VPS_PROVIDER="digitalocean"
 TEMPLATE_IMAGE="ubuntu-24-04-wireguard"
+SUBDOMAIN="app"
 
 echo "VPS under attack! Rotating..."
 
@@ -324,12 +333,12 @@ NEW_IP=$(doctl compute droplet get $NEW_VPS_ID --format PublicIPv4 --no-header)
 ansible-playbook -i "$NEW_IP," deploy-edge.yml
 
 # DNSレコード更新
-update-dns-record "$NEW_IP"
+update-dns-record "$SUBDOMAIN" "$NEW_IP"
 
 # 古いVPS削除（3時間後）
 (sleep 10800 && doctl compute droplet delete $OLD_VPS_ID -f) &
 
-echo "New VPS $NEW_IP is now live!"
+echo "New VPS $NEW_IP is now live for $SUBDOMAIN!"
 ```
 
 ---
@@ -337,7 +346,7 @@ echo "New VPS $NEW_IP is now live!"
 ## コスト試算
 
 | 項目 | 選択肢 | 月額コスト |
-|------|--------|-----------|
+|--------|--------|-----------|
 | **入口ノード（VPS）** | DigitalOcean/Vultr/Hetzner × 2-3台 | $10-15 |
 | | Oracle Cloud Free Tier × 2台 | **$0** |
 | **トンネル** | WireGuard（セルフホスト） | $0 |
@@ -369,17 +378,14 @@ echo "New VPS $NEW_IP is now live!"
 # VPSにCertbotインストール
 apt install certbot python3-certbot-nginx
 
-# ワイルドカード証明書取得（DNS認証）
-certbot certonly --dns-cloudflare \
-  --dns-cloudflare-credentials ~/.secrets/cloudflare.ini \
-  -d yourdomain.com \
-  -d *.yourdomain.com
+# 特定のサブドメインの証明書取得（HTTP-01認証が簡単）
+certbot --nginx -d app.yourdomain.com --non-interactive --agree-tos -m admin@yourdomain.com
 
 # 自動更新設定
 echo "0 3 * * * certbot renew --quiet" | crontab -
 ```
 
-**Cloudflare DNS認証用の設定:**
+**Cloudflare DNS認証用の設定（ワイルドカードが必要な場合）:**
 
 **⚠️ セキュリティ警告:**
 以下の方法は開発・テスト環境向けです。本番環境では、より安全な資格情報管理を使用してください。
@@ -399,10 +405,10 @@ dns_cloudflare_api_token = YOUR_CLOUDFLARE_API_TOKEN
 ```nginx
 server {
     listen 443 ssl http2;
-    server_name yourdomain.com *.yourdomain.com;
+    server_name app.yourdomain.com;
     
-    ssl_certificate /etc/letsencrypt/live/yourdomain.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/yourdomain.com/privkey.pem;
+    ssl_certificate /etc/letsencrypt/live/app.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/app.yourdomain.com/privkey.pem;
     
     # Mozilla Modern設定
     ssl_protocols TLSv1.3 TLSv1.2;
@@ -424,12 +430,13 @@ server {
 # HTTPからHTTPSへリダイレクト
 server {
     listen 80;
-    server_name yourdomain.com *.yourdomain.com;
+    server_name app.yourdomain.com;
     return 301 https://$host$request_uri;
 }
 ```
 
 ---
+
 
 ### オプション2: 自宅サーバーでSSL終端（E2E暗号化）
 
@@ -450,16 +457,10 @@ server {
 # 自宅サーバーにCertbotインストール
 apt install certbot
 
-# DNS認証でワイルドカード証明書取得
-certbot certonly --manual --preferred-challenges dns \
-  -d yourdomain.com \
-  -d *.yourdomain.com
-
-# または、Cloudflare DNS Plugin使用
+# DNS認証で証明書取得
 certbot certonly --dns-cloudflare \
   --dns-cloudflare-credentials ~/.secrets/cloudflare.ini \
-  -d yourdomain.com \
-  -d *.yourdomain.com
+  -d app.yourdomain.com
 ```
 
 **Nginx設定（自宅サーバー）:**
@@ -467,10 +468,10 @@ certbot certonly --dns-cloudflare \
 server {
     listen 80;
     listen 443 ssl http2;
-    server_name yourdomain.com *.yourdomain.com;
+    server_name app.yourdomain.com;
     
-    ssl_certificate /etc/letsencrypt/live/yourdomain.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/yourdomain.com/privkey.pem;
+    ssl_certificate /etc/letsencrypt/live/app.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/app.yourdomain.com/privkey.pem;
     
     ssl_protocols TLSv1.3 TLSv1.2;
     ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256;
@@ -498,6 +499,7 @@ stream {
 
 server {
     listen 80;
+    # $host は app.yourdomain.com になる
     return 301 https://$host$request_uri;
 }
 ```
@@ -537,6 +539,7 @@ http {
 
 ---
 
+
 ### オプション3: ハイブリッド（証明書共有）
 
 **メリット:**
@@ -555,7 +558,7 @@ http {
 #!/bin/bash
 # sync-certs.sh - 証明書をVPSに配布
 
-CERT_DIR="/etc/letsencrypt/live/yourdomain.com"
+CERT_DIR="/etc/letsencrypt/live/app.yourdomain.com"
 VPS_LIST=("vps1.example.com" "vps2.example.com" "vps3.example.com")
 
 # 証明書更新
@@ -566,7 +569,7 @@ for VPS in "${VPS_LIST[@]}"; do
     rsync -avz --delete \
         -e "ssh -i ~/.ssh/vps_key" \
         $CERT_DIR/ \
-        root@$VPS:/etc/letsencrypt/live/yourdomain.com/
+        root@$VPS:/etc/letsencrypt/live/app.yourdomain.com/
     
     # Nginxリロード
     ssh -i ~/.ssh/vps_key root@$VPS "nginx -s reload"
@@ -579,7 +582,6 @@ done
 0 3 * * * /root/sync-certs.sh
 ```
 
----
 
 ### オプション4: Cloudflare Origin Certificate
 
@@ -598,59 +600,7 @@ done
 - ❌ 本プロジェクトの「完全セルフホスト」思想と矛盾
 
 **使用可能なケース:**
-- Cloudflare ProxyをONにする場合のみ（DDoS保護が必要な場合など）
-
-#### 実装方法
-
-**Cloudflare Dashboardで証明書作成:**
-1. Cloudflare Dashboard → SSL/TLS → Origin Server
-2. "Create Certificate"をクリック
-3. ワイルドカード証明書を選択: `*.yourdomain.com`, `yourdomain.com`
-4. 証明書と秘密鍵をダウンロード
-
-**VPSまたは自宅サーバーに配置:**
-```bash
-# 証明書配置
-cat > /etc/ssl/cloudflare/cert.pem << 'EOF'
------BEGIN CERTIFICATE-----
-[Cloudflareからコピー]
------END CERTIFICATE-----
-EOF
-
-cat > /etc/ssl/cloudflare/key.pem << 'EOF'
------BEGIN PRIVATE KEY-----
-[Cloudflareからコピー]
------END PRIVATE KEY-----
-EOF
-
-chmod 600 /etc/ssl/cloudflare/key.pem
-```
-
-**Nginx設定:**
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name yourdomain.com *.yourdomain.com;
-
-    ssl_certificate /etc/ssl/cloudflare/cert.pem;
-    ssl_certificate_key /etc/ssl/cloudflare/key.pem;
-
-    # ⚠️ 注意: Cloudflare Origin Certificateを使用する場合、
-    # Cloudflare Proxy ON が必須。Proxy OFFでは証明書エラーが発生。
-
-    # Cloudflare IPからのみアクセス許可（Proxy ON時のみ有効）
-    # https://www.cloudflare.com/ips/
-    allow 173.245.48.0/20;
-    allow 103.21.244.0/22;
-    # ... その他のCloudflare IP
-    deny all;
-
-    location / {
-        proxy_pass http://10.0.0.1:80;
-        # ...
-    }
-}
-```
+- Cloudflare ProxyをONにする場合のみ
 
 ---
 
@@ -663,7 +613,7 @@ server {
 - ✅ 完全セルフホスト（Cloudflare Proxy不要）
 - ✅ 各VPSで独立して証明書管理
 - ✅ VPS追加時の自動化が容易
-- ✅ DNS認証でワイルドカード証明書取得可能
+- ✅ HTTP-01認証で特定のサブドメイン証明書を簡単に取得可能
 
 **適用シーン:** 小規模〜中規模、運用重視
 
@@ -700,7 +650,8 @@ server {
 # deploy-edge-node.sh
 
 NEW_IP=$1
-DOMAIN="yourdomain.com"
+HOTNAME="app.yourdomain.com"
+EMAIL="admin@yourdomain.com"
 
 # VPSにSSH接続可能になるまで待機
 until ssh root@$NEW_IP "echo ready"; do
@@ -708,9 +659,9 @@ until ssh root@$NEW_IP "echo ready"; do
 done
 
 # Ansible経由で設定デプロイ
-ansible-playbook -i "$NEW_IP," \
-    -e "certbot_email=admin@$DOMAIN" \
-    -e "domain=$DOMAIN" \
+ansible-playbook -i "$NEW_IP,"
+    -e "hostname=$HOSTNAME"
+    -e "certbot_email=$EMAIL"
     deploy-edge.yml
 
 # deploy-edge.ymlの内容（抜粋）
@@ -719,26 +670,11 @@ ansible-playbook -i "$NEW_IP," \
 #     name:
 #       - certbot
 #       - python3-certbot-nginx
-#       - python3-certbot-dns-cloudflare
-#
-# - name: Create Cloudflare credentials
-#   copy:
-#     content: |
-#       dns_cloudflare_api_token = {{ cloudflare_api_token }}
-#     dest: /root/.secrets/cloudflare.ini
-#     mode: 0600  # 必須: ファイルパーミッションを厳密に制限
-#
-# ⚠️ セキュリティノート:
-# - cloudflare_api_token は Ansible Vault で暗号化して保存すること
-# - または、環境変数経由で注入すること
-# - プレーンテキストでバージョン管理に含めないこと
 #
 # - name: Obtain SSL certificate
 #   command: >
-#     certbot certonly --dns-cloudflare
-#     --dns-cloudflare-credentials /root/.secrets/cloudflare.ini
-#     -d {{ domain }} -d *.{{ domain }}
-#     --non-interactive --agree-tos
+#     certbot --nginx --non-interactive --agree-tos
+#     -d {{ hostname }}
 #     -m {{ certbot_email }}
 ```
 
@@ -749,12 +685,12 @@ ansible-playbook -i "$NEW_IP," \
 ### Phase 1: 基本構築
 1. 自宅サーバーにWireGuard Serverをセットアップ
 2. VPS 1台にWireGuard Client + Nginxをセットアップ
-3. DNS設定（Aレコード1つ）
+3. DNS設定（`app` Aレコード1つ）
 4. 動作確認
 
 ### Phase 2: 冗長化
 1. VPS 2台目をセットアップ
-2. DNSにAレコード追加（ラウンドロビン）
+2. DNSにAレコード追加（`app` Aレコード2つ目）
 3. フェイルオーバーテスト
 
 ### Phase 3: 自動化

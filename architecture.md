@@ -25,6 +25,7 @@ Cloudflare Tunnelのような体験を、モジュラーかつセルフホスト
 
 ---
 
+
 ### 2. Edge Node（エッジノード）
 **何者？** インターネット側の入口（使い捨てVPS）
 - ユーザーからのリクエストを受け付ける
@@ -35,6 +36,7 @@ Cloudflare Tunnelのような体験を、モジュラーかつセルフホスト
 **役割:** 防弾盾、攻撃を受けたら即破棄
 
 ---
+
 
 ### 3. Origin（オリジン/各ホスト）
 **何者？** 実際のサービスが動いているホスト
@@ -211,13 +213,13 @@ WireGuardの暗号化トンネルで直接接続
 - ❌ プロキシ・ロードバランシング
 - ❌ SSL終端
 
----
+--- 
 
 ### 具体例: ユーザーがapp.example.comにアクセス
 
 ```
 ステップ1: DNS問い合わせ
-ユーザー → DNS
+ユーザー → DNS (app.example.com?)
 ← 203.0.113.10, 203.0.113.11 (Edge NodeのIP)
 
 ステップ2: HTTPSリクエスト
@@ -254,14 +256,14 @@ Origin:
 
 ### Control Planeが停止した場合の影響
 
-**既存のトラフィック:**
+**既存のトラフィック:** 
 ```
 ✅ 影響なし
 Edge ↔ Origin のWireGuardトンネルは継続
 ユーザーは普通にアクセス可能
 ```
 
-**できなくなること:**
+**できなくなること:** 
 ```
 ❌ 新しいEdge Node追加
 ❌ DNS変更
@@ -270,7 +272,7 @@ Edge ↔ Origin のWireGuardトンネルは継続
 ❌ Web UI/API操作
 ```
 
-**復旧:**
+**復旧:** 
 ```
 Control Planeを再起動すれば元通り
 既存のEdge/Originには影響なし
@@ -416,6 +418,7 @@ docker run -d \
 
 ---
 
+
 ### 2. Edge Provisioner Module
 
 **役割:**
@@ -482,6 +485,7 @@ docker run -d \
 
 ---
 
+
 ### 3. SSL Manager Module
 
 **役割:**
@@ -528,8 +532,7 @@ ssl:
   provider: letsencrypt
   letsencrypt:
     email: admin@example.com
-    challenge_method: dns-01  # dns-01, http-01
-    dns_provider: cloudflare  # DNS-01の場合
+    challenge_method: http-01 # or dns-01
   auto_renew: true
   renew_days_before: 30
 ```
@@ -544,6 +547,7 @@ docker run -d \
 ```
 
 ---
+
 
 ### 4. Health Checker Module
 
@@ -582,15 +586,15 @@ Edge Node・Originのヘルスチェック
 
 3. **SSL証明書有効性チェック**
    ```
-   openssl s_client -connect <edge_node_ip>:443
-   期待結果: 証明書が有効（期限切れでない）
+   openssl s_client -connect <edge_node_ip>:443 -servername <hostname>
+   期待結果: 証明書が有効（期限切れでない, ホスト名が一致）
    頻度: 1日1回
    ```
 
 4. **バックエンド接続性チェック**
    ```
    Edge Node経由でOriginへの接続をテスト
-   GET https://<domain>/health (via Edge)
+   GET https://<hostname>/health (via Edge)
    期待結果: 200 OK（Originからの応答）
    頻度: 30秒ごと
    ```
@@ -637,7 +641,7 @@ type EdgeHeartbeat struct {
 
 2. **アプリケーションヘルスチェック**
    ```
-   GET http://10.0.X.1:80/health (WireGuard経由)
+   GET http://10.0.X.1/health (WireGuard経経由)
    期待結果: 200 OK + 正常なレスポンスボディ
    頻度: 30秒ごと
    ```
@@ -766,6 +770,7 @@ docker run -d \
 
 ---
 
+
 ### 6. Outbound Router Module（オプション）
 
 **役割:**
@@ -853,7 +858,7 @@ docker run -d \
 - DB: PostgreSQL/SQLite
 - 認証: OAuth2/OIDC
 
-**主な機能:**
+**主な機能:** 
 ```
 - ノード登録・削除API
 - 設定生成エンジン
@@ -865,6 +870,7 @@ docker run -d \
 
 ---
 
+
 ### 2. エッジノード（入口ノード）
 
 **役割:**
@@ -875,10 +881,10 @@ docker run -d \
 - DDoS軽減（rate limiting）
 
 **配置:**
-- 使い捨てVPS × 2-3台以上
+-使い捨てVPS × 2-3台以上
 - 異なるプロバイダー・リージョン推奨
 
-**起動シーケンス:**
+**起動シーケエンス:**
 ```
 1. コントロールプレーンに登録リクエスト（node_token使用）
 2. WireGuard設定を受信（鍵、IP、Peer情報）
@@ -895,6 +901,7 @@ docker run -d \
 ```
 
 ---
+
 
 ### 3. オリジンサーバー（自宅サーバー）
 
@@ -927,6 +934,7 @@ AllowedIPs = 10.0.0.11/32
 
 ---
 
+
 ### 4. DNS管理
 
 **役割:**
@@ -941,9 +949,9 @@ AllowedIPs = 10.0.0.11/32
 
 **レコード例:**
 ```
-example.com    A    203.0.113.10  (Edge Node 1)
-example.com    A    203.0.113.11  (Edge Node 2)
-example.com    A    203.0.113.12  (Edge Node 3)
+app.example.com    A    203.0.113.10  (Edge Node 1)
+app.example.com    A    203.0.113.11  (Edge Node 2)
+app.example.com    A    203.0.113.12  (Edge Node 3)
 TTL: 30秒（フェイルオーバー高速化）
 ```
 
@@ -955,7 +963,7 @@ TTL: 30秒（フェイルオーバー高速化）
 ┌─────────────────────────────────────────────────────┐
 │             インターネットユーザー                      │
 └─────────────┬───────────────────────────────────────┘
-              │ DNS Query (Round Robin)
+              │ DNS Query (Round Robin for app.example.com)
               │
     ┌─────────┴──────────┬──────────────┐
     │                    │              │
@@ -1020,10 +1028,10 @@ TTL: 30秒（フェイルオーバー高速化）
 
 ```
 1. 管理者 → Control Plane (Web UI)
-   POST /api/origins
+   POST /api/v1/origins
    {
      "name": "home-server",
-     "domain": "example.com",
+     "domain": "app.example.com",
      "services": [
        {"name": "web", "port": 8001},
        {"name": "api", "port": 8002}
@@ -1076,7 +1084,7 @@ TTL: 30秒（フェイルオーバー高速化）
 
 10. Control Plane → DNS Provider
     - 新しいエッジノードのIPをAレコードに追加
-    - example.com A 203.0.113.10
+    - app.example.com A 203.0.113.10
 
 11. Control Plane → 管理者 (Web UI通知)
     ✅ Edge Node 1 is now live!
@@ -1084,20 +1092,21 @@ TTL: 30秒（フェイルオーバー高速化）
 
 ---
 
+
 ### B. 通常運用時のフロー
 
 ```
 【リクエスト処理】
 1. ユーザー → DNS
-   Query: example.com A?
+   Query: app.example.com A?
 
 2. DNS → ユーザー
    Response: 203.0.113.10, 203.0.113.11, 203.0.113.12
    (Round Robin)
 
 3. ユーザー → Edge Node 1 (203.0.113.10)
-   GET https://example.com/api/users
-   Host: example.com
+   GET https://app.example.com/api/users
+   Host: app.example.com
 
 4. Edge Node 1 (Nginx)
    - SSL終端
@@ -1202,7 +1211,7 @@ Control Plane (every 10s)
     POST /zones/{zone_id}/dns_records
     {
       "type": "A",
-      "name": "@",
+      "name": "app",
       "content": "198.51.100.20"  # 新ノードIP
     }
 
@@ -1390,14 +1399,12 @@ T+183s  Control Plane → SSL Manager Module
         Action: obtain_certificate_for_node
         {
           "edge_node_id": "edge-4",
-          "domains": ["example.com", "*.example.com"]
+          "domains": ["app.example.com"]
         }
 
 T+184s  SSL Manager → Edge Node 4 (SSH)
-        certbot certonly --dns-cloudflare \
-          --dns-cloudflare-credentials /root/.secrets/cf.ini \
-          -d example.com -d *.example.com \
-          --non-interactive
+        certbot --nginx --non-interactive \
+          -d app.example.com -m admin@example.com --agree-tos
 
 T+240s  証明書取得完了（約60秒）
 
@@ -1424,7 +1431,7 @@ T+263s  Control Plane → DNS Manager Module
         Action: add_dns_record
         {
           "edge_node_id": "edge-4",
-          "hostname": "example.com",
+          "hostname": "app.example.com",
           "ip": "198.51.100.20",
           "type": "A",
           "ttl": 30
@@ -1434,7 +1441,7 @@ T+264s  DNS Manager → Cloudflare API
         POST /zones/{zone}/dns_records
         {
           "type": "A",
-          "name": "@",
+          "name": "app",
           "content": "198.51.100.20",
           "ttl": 30
         }
@@ -1462,9 +1469,9 @@ Total Time: 約5分 (T+0s → T+295s)
 ❌ Edge Node 1: Deleted (攻撃を受けたノード)
 
 DNS:
-example.com A 203.0.113.11
-example.com A 203.0.113.12
-example.com A 198.51.100.20
+app.example.com A 203.0.113.11
+app.example.com A 203.0.113.12
+app.example.com A 198.51.100.20
 
 トラフィック分散: 33% / 33% / 33%
 ```
@@ -1502,7 +1509,7 @@ edge_node_management:
   # この数を下回ると自動的に新ノード作成
 ```
 
----
+--- 
 
 ## データモデル
 
@@ -1513,7 +1520,8 @@ edge_node_management:
 CREATE TABLE origins (
   id UUID PRIMARY KEY,
   name VARCHAR(255) NOT NULL,
-  domain VARCHAR(255) NOT NULL,
+  -- app.example.com のような完全なホスト名を格納
+  domain VARCHAR(255) NOT NULL UNIQUE,
   wireguard_ip VARCHAR(15) NOT NULL,  -- 10.0.0.1
   wireguard_public_key TEXT NOT NULL,
   wireguard_private_key_encrypted TEXT NOT NULL,
@@ -1555,7 +1563,8 @@ CREATE TABLE edge_nodes (
 CREATE TABLE dns_records (
   id UUID PRIMARY KEY,
   edge_node_id UUID REFERENCES edge_nodes(id),
-  domain VARCHAR(255) NOT NULL,
+  -- app.example.com のような完全なホスト名を格納
+  hostname VARCHAR(255) NOT NULL,
   record_type VARCHAR(10) NOT NULL,  -- A, AAAA
   record_id VARCHAR(255),  -- Provider側のレコードID
   provider VARCHAR(50),  -- cloudflare, route53
@@ -1599,7 +1608,7 @@ Authorization: Bearer <token>
 
 {
   "name": "home-server",
-  "domain": "example.com",
+  "domain": "app.example.com",
   "services": [
     {"name": "web", "port": 8001, "protocol": "http"},
     {"name": "api", "port": 8002, "protocol": "http"}
@@ -1610,8 +1619,8 @@ Response: 201 Created
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "name": "home-server",
-  "domain": "example.com",
-  "wireguard_ip": "10.0.0.1",
+  "domain": "app.example.com",
+  "wireguard_ip": "10.0.1.1",
   "wireguard_public_key": "...",
   "config_download_url": "/api/v1/origins/{id}/config"
 }
@@ -1637,7 +1646,7 @@ Response: 200 OK
     {
       "id": "...",
       "name": "home-server",
-      "domain": "example.com",
+      "domain": "app.example.com",
       "status": "active",
       "edge_nodes_count": 3,
       "last_heartbeat": "2025-01-21T10:30:00Z"
@@ -1992,7 +2001,7 @@ services:
     ports:
       - "8081:8080"
     restart: unless-stopped
-    profiles:
+    profiles: 
       - standby  # デフォルトでは起動しない
 
   db:
@@ -2003,7 +2012,7 @@ services:
       - db_data:/var/lib/postgresql/data
 ```
 
-**切り替え手順:**
+**切り替え手順:** 
 
 1. Primaryが停止したことを検知
 2. Standbyを起動:
@@ -2026,7 +2035,7 @@ services:
 - ❌ 自動フェイルオーバーなし
 - ❌ RPO/RTOが長い（数分〜数時間）
 
----
+--- 
 
 #### オプション4: 単一インスタンス + 高頻度バックアップ（最小構成）
 
@@ -2149,6 +2158,7 @@ limit_conn addr 10;
 - 自動ノード交換スクリプト
 
 ---
+
 
 ### 5. Origin間の通信分離（重要！）
 
@@ -2366,7 +2376,7 @@ new_origin = {
 
 ---
 
-**推奨構成まとめ:**
+**推奨構成まとめ:** 
 
 | 項目 | 推奨 |
 |------|------|
@@ -2402,6 +2412,7 @@ new_origin = {
 
 ---
 
+
 ### Phase 2: 自動化
 
 **追加機能:**
@@ -2413,6 +2424,7 @@ new_origin = {
 **期間:** +2週間
 
 ---
+
 
 ### Phase 3: エンタープライズ機能
 
@@ -2431,7 +2443,7 @@ new_origin = {
 ## Pangolinとの比較
 
 | 機能 | Pangolin | 自作Kokoa Proxy |
-|-----|----------|----------------|
+|------|----------|----------------|
 | コントロールプレーン | ✅ Pangolin Cloud（SaaS）<br>⚠️ セルフホストは単一ノードのみ | ✅ 完全セルフホスト<br>✅ 無制限エッジノード |
 | 複数エッジノード | ❌ Remote NodeはCloud必須 | ✅ 無制限・完全制御 |
 | 自動フェイルオーバー | ❌ | ✅ DNS統合 |
@@ -2555,6 +2567,7 @@ docker-compose up -d
 - API: http://localhost:8080/api/v1
 
 ---
+
 
 ### 構成2: 分散デプロイ（本番環境）
 
@@ -2787,7 +2800,7 @@ spec:
 
 **現状の問題:**
 - Cloudflare API Rate Limit: 1200 req/5min
-- 複数レプリカが同時にAPI呼び出しすると制限に引っかかる可能性
+- 複数レプリカが同時に証明書取得すると重複リクエスト
 
 **解決策1: 単一インスタンス + キューイング（推奨：小〜中規模）**
 
@@ -2862,6 +2875,7 @@ spec:
 
 ---
 
+
 ### 2. Edge Provisioner Module - スケーラビリティ戦略
 
 **特性:**
@@ -2929,6 +2943,7 @@ spec:
 
 ---
 
+
 ### 3. SSL Manager Module - スケーラビリティ戦略
 
 **現状の問題:**
@@ -2963,6 +2978,7 @@ func (m *SSLManager) Start() {
 ```
 
 ---
+
 
 ### 4. Health Checker Module - スケーラビリティ戦略
 
@@ -3030,6 +3046,7 @@ func (h *HealthChecker) shouldCheckNode(nodeID string) bool {
 ```
 
 ---
+
 
 ### 推奨構成まとめ
 
@@ -3293,3 +3310,5 @@ resp, err := http.Post(
    - Origin: ローカルDocker
 
 どの部分から実装を始めますか?
+
+```
