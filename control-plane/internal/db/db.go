@@ -112,16 +112,24 @@ func (s *Store) CreateRoute(ctx context.Context, params CreateRouteParams) (Rout
 }
 
 type EdgeNode struct {
-	ID        string
-	Name      string
-	TokenHash string
-	CreatedAt time.Time
-	LastSeen  sql.NullTime
+	ID           string
+	Name         string
+	TokenHash    string
+	CreatedAt    time.Time
+	LastSeen     sql.NullTime
+	WGAddr       sql.NullString
+	WGEndpoint   sql.NullString
+	WGPeerPubKey sql.NullString
+	WGAllowedIPs sql.NullString
 }
 
 type RegisterEdgeNodeParams struct {
-	TokenPlain string
-	Name       string
+	TokenPlain   string
+	Name         string
+	WGAddr       string
+	WGEndpoint   string
+	WGPeerPubKey string
+	WGAllowedIPs string
 }
 
 func (s *Store) RegisterEdgeNode(ctx context.Context, params RegisterEdgeNodeParams) (EdgeNode, error) {
@@ -129,17 +137,21 @@ func (s *Store) RegisterEdgeNode(ctx context.Context, params RegisterEdgeNodePar
 	id := uuid.NewString()
 	tokenHash := sha256.Sum256([]byte(params.TokenPlain))
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO edge_nodes (id, name, token_hash, created_at)
-		VALUES (?, ?, ?, ?)
-	`, id, params.Name, fmt.Sprintf("%x", tokenHash[:]), now)
+		INSERT INTO edge_nodes (id, name, token_hash, wg_addr, wg_endpoint, wg_peer_pubkey, wg_allowed_ips, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, id, params.Name, fmt.Sprintf("%x", tokenHash[:]), nullIfEmpty(params.WGAddr), nullIfEmpty(params.WGEndpoint), nullIfEmpty(params.WGPeerPubKey), nullIfEmpty(params.WGAllowedIPs), now)
 	if err != nil {
 		return EdgeNode{}, fmt.Errorf("insert edge node: %w", err)
 	}
 	return EdgeNode{
-		ID:        id,
-		Name:      params.Name,
-		TokenHash: fmt.Sprintf("%x", tokenHash[:]),
-		CreatedAt: now,
+		ID:           id,
+		Name:         params.Name,
+		TokenHash:    fmt.Sprintf("%x", tokenHash[:]),
+		CreatedAt:    now,
+		WGAddr:       toNullString(params.WGAddr),
+		WGEndpoint:   toNullString(params.WGEndpoint),
+		WGPeerPubKey: toNullString(params.WGPeerPubKey),
+		WGAllowedIPs: toNullString(params.WGAllowedIPs),
 	}, nil
 }
 
@@ -147,10 +159,10 @@ func (s *Store) EdgeNodeByToken(ctx context.Context, token string) (EdgeNode, er
 	tokenHash := sha256.Sum256([]byte(token))
 	var node EdgeNode
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, name, token_hash, created_at, last_seen
+		SELECT id, name, token_hash, wg_addr, wg_endpoint, wg_peer_pubkey, wg_allowed_ips, created_at, last_seen
 		FROM edge_nodes
 		WHERE token_hash = ?
-	`, fmt.Sprintf("%x", tokenHash[:])).Scan(&node.ID, &node.Name, &node.TokenHash, &node.CreatedAt, &node.LastSeen)
+	`, fmt.Sprintf("%x", tokenHash[:])).Scan(&node.ID, &node.Name, &node.TokenHash, &node.WGAddr, &node.WGEndpoint, &node.WGPeerPubKey, &node.WGAllowedIPs, &node.CreatedAt, &node.LastSeen)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return EdgeNode{}, err
@@ -202,7 +214,7 @@ func (s *Store) ListRoutes(ctx context.Context) ([]RouteWithOrigin, error) {
 
 func (s *Store) ListEdgeNodes(ctx context.Context) ([]EdgeNode, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, token_hash, created_at, last_seen
+		SELECT id, name, token_hash, wg_addr, wg_endpoint, wg_peer_pubkey, wg_allowed_ips, created_at, last_seen
 		FROM edge_nodes
 		ORDER BY created_at DESC
 	`)
@@ -214,12 +226,26 @@ func (s *Store) ListEdgeNodes(ctx context.Context) ([]EdgeNode, error) {
 	var out []EdgeNode
 	for rows.Next() {
 		var n EdgeNode
-		if err := rows.Scan(&n.ID, &n.Name, &n.TokenHash, &n.CreatedAt, &n.LastSeen); err != nil {
+		if err := rows.Scan(&n.ID, &n.Name, &n.TokenHash, &n.WGAddr, &n.WGEndpoint, &n.WGPeerPubKey, &n.WGAllowedIPs, &n.CreatedAt, &n.LastSeen); err != nil {
 			return nil, fmt.Errorf("scan edge node: %w", err)
 		}
 		out = append(out, n)
 	}
 	return out, rows.Err()
+}
+
+func nullIfEmpty(v string) any {
+	if v == "" {
+		return nil
+	}
+	return v
+}
+
+func toNullString(v string) sql.NullString {
+	if v == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: v, Valid: true}
 }
 
 func (s *Store) ListOrigins(ctx context.Context) ([]Origin, error) {

@@ -287,7 +287,13 @@ const indexHTML = `<!DOCTYPE html>
             'Content-Type': 'application/json',
             'Authorization': 'Bearer ' + bootstrap,
           },
-          body: JSON.stringify(payload),
+          body: JSON.stringify({
+            ...payload,
+            wg_addr: document.getElementById('edge-wg-addr').value.trim(),
+            wg_endpoint: document.getElementById('edge-wg-endpoint').value.trim(),
+            wg_peer_pubkey: document.getElementById('edge-wg-peer').value.trim(),
+            wg_allowed_ips: document.getElementById('edge-wg-allowed').value.trim(),
+          }),
         });
         const nodeToken = resp.token || '';
         const wgAddr = document.getElementById('edge-wg-addr').value.trim();

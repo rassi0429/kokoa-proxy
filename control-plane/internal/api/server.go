@@ -146,16 +146,28 @@ func (s *Server) handleRegisterEdgeNode(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var req struct {
-		Name string `json:"name"`
+		Name         string `json:"name"`
+		WGAddr       string `json:"wg_addr"`
+		WGEndpoint   string `json:"wg_endpoint"`
+		WGPeerPubKey string `json:"wg_peer_pubkey"`
+		WGAllowedIPs string `json:"wg_allowed_ips"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
+	if err := validateEdgeRegister(req.Name, req.WGAddr, req.WGEndpoint, req.WGPeerPubKey, req.WGAllowedIPs); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	issuedToken := uuid.NewString()
 	node, err := s.store.RegisterEdgeNode(r.Context(), db.RegisterEdgeNodeParams{
-		TokenPlain: issuedToken,
-		Name:       req.Name,
+		TokenPlain:   issuedToken,
+		Name:         req.Name,
+		WGAddr:       req.WGAddr,
+		WGEndpoint:   req.WGEndpoint,
+		WGPeerPubKey: req.WGPeerPubKey,
+		WGAllowedIPs: req.WGAllowedIPs,
 	})
 	if err != nil {
 		status := http.StatusBadRequest
@@ -302,6 +314,29 @@ func validateRoute(hostname string, port int, originID string) error {
 	}
 	if port < 1 || port > 65535 {
 		return errf("target_port must be between 1 and 65535")
+	}
+	return nil
+}
+
+func validateEdgeRegister(name, wgAddr, wgEndpoint, wgPeer, wgAllowed string) error {
+	if strings.TrimSpace(name) == "" {
+		return errf("name is required")
+	}
+	if wgAddr != "" {
+		if _, err := netip.ParsePrefix(wgAddr); err != nil {
+			return errf("wg_addr must be CIDR (e.g. 10.0.0.3/32)")
+		}
+	}
+	if wgEndpoint != "" && !strings.Contains(wgEndpoint, ":") {
+		return errf("wg_endpoint must include host:port")
+	}
+	if wgPeer != "" && len(wgPeer) < 20 {
+		return errf("wg_peer_pubkey looks invalid")
+	}
+	if wgAllowed != "" {
+		if _, err := netip.ParsePrefix(wgAllowed); err != nil {
+			return errf("wg_allowed_ips must be CIDR")
+		}
 	}
 	return nil
 }

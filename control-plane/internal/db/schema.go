@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS edge_nodes (
 	id TEXT PRIMARY KEY,
 	token_hash TEXT NOT NULL UNIQUE,
 	name TEXT,
+	wg_addr TEXT,
+	wg_endpoint TEXT,
+	wg_peer_pubkey TEXT,
+	wg_allowed_ips TEXT,
 	created_at DATETIME NOT NULL,
 	last_seen DATETIME
 );
