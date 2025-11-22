@@ -79,11 +79,11 @@ func (s *Store) CreateOrigin(ctx context.Context, params CreateOriginParams) (Or
 }
 
 type Route struct {
-	ID        string
-	Hostname  string
-	OriginID  string
+	ID         string
+	Hostname   string
+	OriginID   string
 	TargetPort int
-	CreatedAt time.Time
+	CreatedAt  time.Time
 }
 
 type CreateRouteParams struct {
@@ -103,11 +103,11 @@ func (s *Store) CreateRoute(ctx context.Context, params CreateRouteParams) (Rout
 		return Route{}, fmt.Errorf("insert route: %w", err)
 	}
 	return Route{
-		ID:        id,
-		Hostname:  params.Hostname,
-		OriginID:  params.OriginID,
+		ID:         id,
+		Hostname:   params.Hostname,
+		OriginID:   params.OriginID,
 		TargetPort: params.TargetPort,
-		CreatedAt: now,
+		CreatedAt:  now,
 	}, nil
 }
 
@@ -171,15 +171,16 @@ func (s *Store) TouchEdgeNode(ctx context.Context, id string, at time.Time) erro
 }
 
 type RouteWithOrigin struct {
-	Hostname   string
-	TargetPort int
-	OriginID   string
+	Hostname    string
+	TargetPort  int
+	OriginID    string
+	OriginName  string
 	WireguardIP string
 }
 
 func (s *Store) ListRoutes(ctx context.Context) ([]RouteWithOrigin, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT r.hostname, r.target_port, r.origin_id, o.wireguard_ip
+		SELECT r.hostname, r.target_port, r.origin_id, o.name, o.wireguard_ip
 		FROM routes r
 		INNER JOIN origins o ON r.origin_id = o.id
 	`)
@@ -191,10 +192,32 @@ func (s *Store) ListRoutes(ctx context.Context) ([]RouteWithOrigin, error) {
 	var out []RouteWithOrigin
 	for rows.Next() {
 		var r RouteWithOrigin
-		if err := rows.Scan(&r.Hostname, &r.TargetPort, &r.OriginID, &r.WireguardIP); err != nil {
+		if err := rows.Scan(&r.Hostname, &r.TargetPort, &r.OriginID, &r.OriginName, &r.WireguardIP); err != nil {
 			return nil, fmt.Errorf("scan route: %w", err)
 		}
 		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListOrigins(ctx context.Context) ([]Origin, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, name, wireguard_ip, wireguard_public_key, wireguard_private_key_encrypted, created_at
+		FROM origins
+		ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list origins: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Origin
+	for rows.Next() {
+		var o Origin
+		if err := rows.Scan(&o.ID, &o.Name, &o.WireguardIP, &o.WireguardPublicKey, &o.WireguardPrivateKeyEncrypted, &o.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan origin: %w", err)
+		}
+		out = append(out, o)
 	}
 	return out, rows.Err()
 }

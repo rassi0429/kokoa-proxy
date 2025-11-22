@@ -3,11 +3,12 @@
 ## 完了した実装
 - Control Planeスケルトン（`control-plane/`）: エントリーポイント、HTTPサーバ配線、環境変数設定、Graceful shutdown。
 - 永続化: SQLiteスキーマ（`origins`, `routes`, `edge_nodes`）、起動時マイグレーション、作成系ヘルパー（origin/route、edge登録、トークン検索、last_seen更新、route一覧）。
-- API: `POST /api/v1/origins`, `POST /api/v1/routes`, `POST /api/v1/edge-nodes/register`（ブートストラップトークン必須）、`GET /api/v1/edge-nodes/me/config`（Bearerトークン）、`GET /healthz`。簡易ログとプレースホルダWeb UI。
+- API: `POST /api/v1/origins`, `POST /api/v1/routes`, `POST /api/v1/edge-nodes/register`（ブートストラップトークン必須）、`GET /api/v1/edge-nodes/me/config`（Bearerトークン）、`GET /healthz`。`GET /api/v1/origins/list`, `GET /api/v1/routes/list` でUI用一覧を提供。バリデーション、409返却、JSON Content-Typeチェック、レートリミット、ログを実装。
 - 設定生成: nginx `map`決定論生成＋config hash/hostnameソート、順序性テストあり。
 - コンテナ/Compose: `control-plane/Dockerfile`（linux/amd64静的ビルド、Alpineランタイム、`/data`ボリューム）と`docker-compose.yaml`（8080公開、永続ボリューム）。
 - Edge/Originツール: エージェントループ（`scripts/kokoa-edge-agent/poll_config.sh`）でconfig取得→nginx map原子的反映→reload＋バックオフ。インストーラ雛形（`install-edge.sh`, `install-origin.sh`）、DNS CLIスタブ（`scripts/kokoa-dns/kokoa-dns.sh`）。
-- 追加整備: `go mod tidy`で`go.sum`生成、APIバリデーション（hostname/IP/port）、JSON Content-Typeチェック、制約違反時409返却、レートリミット（IPごと60req/分）、構造化ログ風のステータス出力、APIユニットテスト（バリデーション/ルート作成）、`go test ./...`実行。
+- Web UI: `internal/web` で単一ページUIを提供（Origins/Routesの作成・一覧、fetchベースでAPI連携）。
+- 追加整備: `go mod tidy`で`go.sum`生成、レートリミット（IPごと60req/分）、構造化ログ風のステータス出力、APIユニットテスト、`docs/quickstart.md`/`Makefile`/`.env.example`/`scripts/dev/seed.sh` 追加、`go test ./...`実行済み。
 
 ## 残タスク / 次にやること
 - staticcheck導入、SQLite CLI整備。

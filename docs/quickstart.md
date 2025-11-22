@@ -12,7 +12,10 @@
    # cd control-plane && CP_BOOTSTRAP_TOKEN=yourtoken go run ./cmd/kokoa-cp
    ```
 
-3. Edge ノードを登録（ブートストラップトークンを使用）  
+3. Web UI から操作（ブラウザで `http://localhost:8080/`）  
+   Origins/Routesの登録がブラウザ上で可能です。
+
+4. Edge ノードを登録（ブートストラップトークンを使用）  
    ```bash
    BOOT=yourtoken
    curl -X POST http://localhost:8080/api/v1/edge-nodes/register \
@@ -22,7 +25,7 @@
    # レスポンス: {"edge_node_id":"...","token":"<NODE_TOKEN>"}
    ```
 
-4. Origin を登録  
+5. Origin を登録  
    ```bash
    curl -X POST http://localhost:8080/api/v1/origins \
      -H "Content-Type: application/json" \
@@ -30,7 +33,7 @@
    # レスポンスから origin_id を取得
    ```
 
-5. Route を登録  
+6. Route を登録  
    ```bash
    ORIGIN_ID=<origin-id>
    curl -X POST http://localhost:8080/api/v1/routes \
@@ -38,7 +41,7 @@
      -d "{\"hostname\":\"app.example.com\",\"origin_id\":\"${ORIGIN_ID}\",\"target_port\":8080}"
    ```
 
-6. Edge エージェントを起動（テスト用）  
+7. Edge エージェントを起動（テスト用）  
    ```bash
    CONTROL_PLANE_URL=http://localhost:8080 \
    NODE_TOKEN=<上で受け取った NODE_TOKEN> \
@@ -59,3 +62,4 @@
 - `make run` — ローカル起動（デフォルト: `:8080`）  
 - `make docker-up` — Compose で起動  
 - `make docker-down` — Compose を停止
+- `scripts/dev/seed.sh` — CP起動後にEdge/Origin/Routeを自動登録してconfigを取得

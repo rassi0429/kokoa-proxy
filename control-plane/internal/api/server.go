@@ -42,6 +42,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/api/v1/origins", s.handleCreateOrigin)
 	mux.HandleFunc("/api/v1/routes", s.handleCreateRoute)
+	mux.HandleFunc("/api/v1/origins/list", s.handleListOrigins)
+	mux.HandleFunc("/api/v1/routes/list", s.handleListRoutes)
 	mux.HandleFunc("/api/v1/edge-nodes/register", s.handleRegisterEdgeNode)
 	mux.HandleFunc("/api/v1/edge-nodes/me/config", s.handleEdgeConfig)
 	mux.Handle("/", web.Handler())
@@ -197,6 +199,32 @@ func (s *Server) handleEdgeConfig(w http.ResponseWriter, r *http.Request) {
 		"nginx_map":   config.Map,
 		"routes":      config.Routes,
 	})
+}
+
+func (s *Server) handleListOrigins(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	list, err := s.store.ListOrigins(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list origins")
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+func (s *Server) handleListRoutes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	list, err := s.store.ListRoutes(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list routes")
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
 }
 
 func (s *Server) validateBootstrapToken(r *http.Request) bool {
