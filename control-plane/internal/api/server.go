@@ -3,7 +3,9 @@ package api
 import (
 	"encoding/json"
 	"log"
+	"mime"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -23,6 +25,7 @@ type Server struct {
 	store          *db.Store
 	bootstrapToken string
 	logger         *log.Logger
+	rateLimiter    *rateLimiter
 }
 
 func NewServer(cfg ServerConfig) *Server {
@@ -30,6 +33,7 @@ func NewServer(cfg ServerConfig) *Server {
 		store:          cfg.Store,
 		bootstrapToken: cfg.BootstrapToken,
 		logger:         cfg.Logger,
+		rateLimiter:    newRateLimiter(60, time.Minute),
 	}
 }
 
@@ -41,7 +45,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/v1/edge-nodes/register", s.handleRegisterEdgeNode)
 	mux.HandleFunc("/api/v1/edge-nodes/me/config", s.handleEdgeConfig)
 	mux.Handle("/", web.Handler())
-	return s.logRequests(mux)
+	return s.logRequests(s.applyRateLimit(mux))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -50,8 +54,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleCreateOrigin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
+	}
+	if ct := r.Header.Get("Content-Type"); ct != "" {
+		mt, _, _ := mime.ParseMediaType(ct)
+		if mt != "application/json" {
+			writeError(w, http.StatusUnsupportedMediaType, "content-type must be application/json")
+			return
+		}
 	}
 	var req struct {
 		Name                         string `json:"name"`
@@ -60,11 +71,11 @@ func (s *Server) handleCreateOrigin(w http.ResponseWriter, r *http.Request) {
 		WireguardPrivateKeyEncrypted string `json:"wireguard_private_key_encrypted"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if req.Name == "" || req.WireguardIP == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name and wg_ip are required"})
+	if err := validateOrigin(req.Name, req.WireguardIP); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	origin, err := s.store.CreateOrigin(r.Context(), db.CreateOriginParams{
@@ -74,7 +85,11 @@ func (s *Server) handleCreateOrigin(w http.ResponseWriter, r *http.Request) {
 		WireguardPrivateKeyEncrypted: req.WireguardPrivateKeyEncrypted,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		status := http.StatusBadRequest
+		if isConstraintError(err) {
+			status = http.StatusConflict
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusCreated, origin)
@@ -82,7 +97,7 @@ func (s *Server) handleCreateOrigin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateRoute(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	var req struct {
@@ -91,11 +106,11 @@ func (s *Server) handleCreateRoute(w http.ResponseWriter, r *http.Request) {
 		TargetPort int    `json:"target_port"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if req.Hostname == "" || req.OriginID == "" || req.TargetPort == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hostname, origin_id and target_port are required"})
+	if err := validateRoute(req.Hostname, req.TargetPort, req.OriginID); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	route, err := s.store.CreateRoute(r.Context(), db.CreateRouteParams{
@@ -104,7 +119,11 @@ func (s *Server) handleCreateRoute(w http.ResponseWriter, r *http.Request) {
 		TargetPort: req.TargetPort,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		status := http.StatusBadRequest
+		if isConstraintError(err) {
+			status = http.StatusConflict
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusCreated, route)
@@ -112,22 +131,22 @@ func (s *Server) handleCreateRoute(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRegisterEdgeNode(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if s.bootstrapToken == "" {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "bootstrap token is not configured"})
+		writeError(w, http.StatusServiceUnavailable, "bootstrap token is not configured")
 		return
 	}
 	if !s.validateBootstrapToken(r) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid bootstrap token"})
+		writeError(w, http.StatusUnauthorized, "invalid bootstrap token")
 		return
 	}
 	var req struct {
 		Name string `json:"name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 	issuedToken := uuid.NewString()
@@ -136,7 +155,11 @@ func (s *Server) handleRegisterEdgeNode(w http.ResponseWriter, r *http.Request) 
 		Name:       req.Name,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		status := http.StatusBadRequest
+		if isConstraintError(err) {
+			status = http.StatusConflict
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -147,24 +170,24 @@ func (s *Server) handleRegisterEdgeNode(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleEdgeConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	token, ok := bearerToken(r.Header.Get("Authorization"))
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing bearer token"})
+		writeError(w, http.StatusUnauthorized, "missing bearer token")
 		return
 	}
 	node, err := s.store.EdgeNodeByToken(r.Context(), token)
 	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token"})
+		writeError(w, http.StatusUnauthorized, "invalid token")
 		return
 	}
 	_ = s.store.TouchEdgeNode(r.Context(), node.ID, time.Now())
 
 	routes, err := s.store.ListRoutes(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load routes"})
+		writeError(w, http.StatusInternalServerError, "failed to load routes")
 		return
 	}
 	config := generator.BuildConfig(routes)
@@ -189,10 +212,12 @@ func (s *Server) validateBootstrapToken(r *http.Request) bool {
 
 func (s *Server) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		start := time.Now()
+		next.ServeHTTP(rec, r)
 		if s.logger != nil {
-			s.logger.Printf("%s %s", r.Method, r.URL.Path)
+			s.logger.Printf("method=%s path=%s status=%d dur=%s", r.Method, r.URL.Path, rec.status, time.Since(start))
 		}
-		next.ServeHTTP(w, r)
 	})
 }
 
@@ -207,4 +232,86 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+func validateOrigin(name, wgIP string) error {
+	if strings.TrimSpace(name) == "" {
+		return errf("name is required")
+	}
+	if wgIP == "" {
+		return errf("wg_ip is required")
+	}
+	if _, err := netip.ParseAddr(wgIP); err != nil {
+		return errf("wg_ip must be a valid IP address")
+	}
+	return nil
+}
+
+func validateRoute(hostname string, port int, originID string) error {
+	if strings.TrimSpace(hostname) == "" || originID == "" {
+		return errf("hostname and origin_id are required")
+	}
+	if !validHostname(hostname) {
+		return errf("hostname is invalid")
+	}
+	if port < 1 || port > 65535 {
+		return errf("target_port must be between 1 and 65535")
+	}
+	return nil
+}
+
+func validHostname(h string) bool {
+	if strings.HasSuffix(h, ".") {
+		h = strings.TrimSuffix(h, ".")
+	}
+	parts := strings.Split(h, ".")
+	if len(parts) < 2 {
+		return false
+	}
+	for _, p := range parts {
+		if len(p) == 0 || len(p) > 63 {
+			return false
+		}
+		for i := 0; i < len(p); i++ {
+			c := p[i]
+			if !(c == '-' || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+				return false
+			}
+		}
+		if p[0] == '-' || p[len(p)-1] == '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func errf(msg string) error {
+	return &apiError{msg: msg}
+}
+
+type apiError struct {
+	msg string
+}
+
+func (e *apiError) Error() string { return e.msg }
+
+func isConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "constraint failed")
+}
+
+func (s *Server) applyRateLimit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.rateLimiter != nil && !s.rateLimiter.allow(r.RemoteAddr) {
+			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
