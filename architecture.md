@@ -105,7 +105,7 @@ Cloudflare Tunnelのような体験を、モジュラーかつセルフホスト
 2.  **Control Plane**は、DBから全ルート情報を取得し、Nginxの`map`設定と管理対象のホスト名リスト（例: `["app.hoge.com", "wiki.fuga.com"]`）をJSONで返す。
 3.  **Edgeエージェント**は受信した設定を適用する。
     *   Nginxの`map`ファイルを更新し、`nginx -s reload`を実行。
-    *   ホスト名リストに新しいホストがあれば`certbot`で証明書を取得。
+    *   ホスト名リストに新しいホストがあればEdgeがHTTP-01(webroot)で`certbot certonly`を実行して証明書を取得（CPはホスト名とstaging/本番フラグを渡すだけ）。
 
 ---
 
@@ -211,10 +211,8 @@ server {
 
     # SSL証明書はSNIにより自動で選択される
     # この部分はエージェントがcertbotで証明書を取得するたびに更新・追加される
-    ssl_certificate /etc/letsencrypt/live/app.hoge.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/app.hoge.com/privkey.pem;
-    ssl_certificate /etc/letsencrypt/live/wiki.fuga.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/wiki.fuga.com/privkey.pem;
+    # （本番では `/etc/nginx/kokoa/servers/*.conf` をincludeし、個別サーバーブロックで
+    #  /etc/letsencrypt/live/<hostname>/... を参照する運用にする）
 
     location / {
         if ($kokoa_backend = "") {
@@ -1538,7 +1536,7 @@ T+183s  Control Plane → SSL Manager Module
         }
 
 T+184s  SSL Manager → Edge Node 4 (SSH)
-        certbot --nginx --non-interactive \
+        certbot certonly --webroot -w /var/www/letsencrypt --non-interactive \
           -d app.example.com -m admin@example.com --agree-tos
 
 T+240s  証明書取得完了（約60秒）

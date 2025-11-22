@@ -18,7 +18,7 @@
 - **MVPでの実装範囲**:
   - `kokoa-edge-agent`: 定期的にControl Planeに設定を問い合わせるシンプルなエージェント（cronで実行するシェルスクリプトで実装）。
   - 受信した設定に基づき、Nginxの`map`ファイルを更新し、Nginxをリロードする機能。
-  - 受信したホスト名リストに基づき、`certbot`を実行してSSL証明書を個別に取得・管理する機能。
+  - 受信したホスト名リストに基づき、Edge自身がHTTP-01(webroot)で`certbot certonly`を実行してSSL証明書を取得・管理する機能（CPはホスト名とstaging/本番フラグを渡すだけ）。
 
 ### 1.3. Origin（オリジン）
 - **役割**: 実際のWebサービスが動作するバックエンドホスト。
@@ -133,11 +133,13 @@ nginx -s reload
 # 3. SSL証明書を管理
 HOSTNAMES=$(echo "$CONFIG_JSON" | jq -r '.hostnames[]')
 EMAIL="admin@example.com"
+WEBROOT="/var/www/letsencrypt"
+mkdir -p "$WEBROOT"
 
 for HOST in $HOSTNAMES; do
   if [ ! -f "/etc/letsencrypt/live/$HOST/fullchain.pem" ]; then
     echo "Obtaining certificate for $HOST..."
-    certbot --nginx -d "$HOST" --non-interactive --agree-tos -m "$EMAIL"
+    certbot certonly --webroot -w "$WEBROOT" -d "$HOST" --non-interactive --agree-tos -m "$EMAIL"
   fi
 done
 ```

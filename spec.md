@@ -253,19 +253,20 @@ $ kokoa-dns add --name app --ip <new_ip_address>
 
 ## SSL/TLS証明書の処理
 
-Edge Nodeに常駐するエージェントが、Control Planeから受け取ったホスト名リスト（例: `app.hoge.com`, `wiki.fuga.com`）に基づき、`certbot`を使用して個別に証明書を取得・管理します。異なるベースドメインでも問題なく動作します。
+Edge Nodeに常駐するエージェントが、Control Planeから受け取ったホスト名リスト（例: `app.hoge.com`, `wiki.fuga.com`）に基づき、HTTP-01(webroot)で`certbot certonly`を実行し、証明書を取得・管理します。CPはホスト名リストとstaging/本番フラグを渡すだけで、チャレンジはEdgeで完結します。異なるベースドメインでも問題なく動作します。
 
 ```bash
 # Edge Node上のエージェントが実行するコマンドの例
 HOSTNAMES_FROM_CP=("app.hoge.com" "wiki.fuga.com")
 EMAIL="admin@example.com"
+WEBROOT="/var/www/letsencrypt"
+mkdir -p "$WEBROOT"
 
 for HOST in "${HOSTNAMES_FROM_CP[@]}"; do
   # 証明書がなければ新規取得
   if [ ! -f "/etc/letsencrypt/live/$HOST/fullchain.pem" ]; then
     echo "Obtaining certificate for $HOST..."
-    certbot --nginx -d "$HOST" --non-interactive --agree-tos -m "$EMAIL"
+    certbot certonly --webroot -w "$WEBROOT" -d "$HOST" --non-interactive --agree-tos -m "$EMAIL"
   fi
 done
 ```
-
