@@ -8,7 +8,7 @@
 - コンテナ/Compose: `control-plane/Dockerfile`（linux/amd64静的ビルド、Alpineランタイム、`/data`ボリューム）と`docker-compose.yaml`（8080公開、永続ボリューム）。
 - Edge/Originツール: エージェントループ（`scripts/kokoa-edge-agent/poll_config.sh`）でconfig取得→nginx map原子的反映→reload＋バックオフ。インストーラ雛形（`install-edge.sh`, `install-origin.sh`）、DNS CLIスタブ（`scripts/kokoa-dns/kokoa-dns.sh`）。
 - Web UI: `internal/web` で単一ページUIを提供（Origins/Routesの作成・一覧、fetchベースでAPI連携）。
-- 追加整備: `go mod tidy`で`go.sum`生成、レートリミット（IPごと60req/分）、構造化ログ風のステータス出力、APIユニットテスト、`docs/quickstart.md`/`Makefile`/`.env.example`/`scripts/dev/seed.sh` 追加、`go test ./...`実行済み。
+- 追加整備: `go mod tidy`で`go.sum`生成、レートリミット（IPごと60req/分）、構造化ログ風のステータス出力、APIユニットテスト、`docs/quickstart.md`/`Makefile`/`.env.example`/`scripts/dev/seed.sh` 追加、ワンライナー配布用エンドポイント（`/edge/install.sh`, `/edge/poll_config.sh`, `/origin/install.sh`）をwebハンドラに追加、`go test ./...`実行済み。
 
 ## 残タスク / 次にやること
 - staticcheck導入、SQLite CLI整備。

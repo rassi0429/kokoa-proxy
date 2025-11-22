@@ -44,6 +44,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/v1/routes", s.handleCreateRoute)
 	mux.HandleFunc("/api/v1/origins/list", s.handleListOrigins)
 	mux.HandleFunc("/api/v1/routes/list", s.handleListRoutes)
+	mux.HandleFunc("/api/v1/edge-nodes/list", s.handleListEdgeNodes)
 	mux.HandleFunc("/api/v1/edge-nodes/register", s.handleRegisterEdgeNode)
 	mux.HandleFunc("/api/v1/edge-nodes/me/config", s.handleEdgeConfig)
 	mux.Handle("/", web.Handler())
@@ -222,6 +223,19 @@ func (s *Server) handleListRoutes(w http.ResponseWriter, r *http.Request) {
 	list, err := s.store.ListRoutes(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list routes")
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+func (s *Server) handleListEdgeNodes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	list, err := s.store.ListEdgeNodes(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list edge nodes")
 		return
 	}
 	writeJSON(w, http.StatusOK, list)

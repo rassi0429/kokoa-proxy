@@ -200,6 +200,28 @@ func (s *Store) ListRoutes(ctx context.Context) ([]RouteWithOrigin, error) {
 	return out, rows.Err()
 }
 
+func (s *Store) ListEdgeNodes(ctx context.Context) ([]EdgeNode, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, name, token_hash, created_at, last_seen
+		FROM edge_nodes
+		ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list edge nodes: %w", err)
+	}
+	defer rows.Close()
+
+	var out []EdgeNode
+	for rows.Next() {
+		var n EdgeNode
+		if err := rows.Scan(&n.ID, &n.Name, &n.TokenHash, &n.CreatedAt, &n.LastSeen); err != nil {
+			return nil, fmt.Errorf("scan edge node: %w", err)
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) ListOrigins(ctx context.Context) ([]Origin, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, name, wireguard_ip, wireguard_public_key, wireguard_private_key_encrypted, created_at

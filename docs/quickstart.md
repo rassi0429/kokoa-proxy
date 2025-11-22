@@ -11,11 +11,23 @@
    # またはローカルで:
    # cd control-plane && CP_BOOTSTRAP_TOKEN=yourtoken go run ./cmd/kokoa-cp
    ```
+   **ボリューム権限で失敗する場合**: Dockerfileを更新したので再ビルドが必要です。既存の `cp-data` ボリュームを削除すると権限がリセットされます。例: `docker compose down -v && docker compose up --build`
 
 3. Web UI から操作（ブラウザで `http://localhost:8080/`）  
    Origins/Routesの登録がブラウザ上で可能です。
 
-4. Edge ノードを登録（ブートストラップトークンを使用）  
+4. Edge ノードを登録（ワンライナー配布）  
+   ```bash
+   # bash の環境に渡す場合（パイプラインでも確実に変数を渡せる方法）
+   curl -fsSL http://localhost:8080/edge/install.sh | BOOTSTRAP_TOKEN=<CP_BOOTSTRAP_TOKEN> bash
+   # または引数指定
+   curl -fsSL http://localhost:8080/edge/install.sh | bash -s -- --bootstrap-token <CP_BOOTSTRAP_TOKEN>
+   # WireGuardも自動セットアップする場合（例）
+   curl -fsSL http://localhost:8080/edge/install.sh | BOOTSTRAP_TOKEN=<CP_BOOTSTRAP_TOKEN> WG_ADDR=10.0.0.3/32 WG_ENDPOINT=origin.example.com:51820 WG_PEER_PUBKEY=<origin_pubkey> bash
+   ```
+   ※systemdがない環境では最後に表示されるコマンドを手動で実行してください。
+
+   Edge ノードを登録（curlで直接）  
    ```bash
    BOOT=yourtoken
    curl -X POST http://localhost:8080/api/v1/edge-nodes/register \
@@ -31,6 +43,11 @@
      -H "Content-Type: application/json" \
      -d '{"name":"origin-1","wg_ip":"10.0.0.2"}'
    # レスポンスから origin_id を取得
+   ```
+   Origin インストールワンライナー（登録済みoriginのWG_IPを使う）:
+   ```bash
+   curl -fsSL http://localhost:8080/origin/install.sh | WG_ADDR=10.0.0.2/32 bash
+   # もしくは UI の Origins リストに表示されるコマンドを利用
    ```
 
 6. Route を登録  
