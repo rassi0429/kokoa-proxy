@@ -2,7 +2,6 @@
 
 ## ルート
 - `README.md`: プロジェクト概要とフォルダマップ
-- `architecture.md` / `spec.md` / `mvp-definition.md` / `implementation-plan.md` / `implementation-progress.md`: 仕様・計画・進捗ドキュメント
 - `docker-compose.yaml`: Control PlaneをDocker Composeで起動する設定
 - `install-edge.sh` / `install-origin.sh`: Edge/Origin向けのインストーラ雛形
 
@@ -18,3 +17,6 @@
 ## scripts/
 - `kokoa-edge-agent/`: エッジ側の設定ポーリングスクリプト
 - `kokoa-dns/`: 単一ゾーン向けDNS CLIスタブ
+
+## docs/
+- 仕様・計画・進捗ドキュメント一式: `architecture.md`, `spec.md`, `mvp-definition.md`, `implementation-plan.md`, `implementation-progress.md`, `use-cases.md`, `GEMINI.md`, `gemini-problem.md`, `claude.md`
