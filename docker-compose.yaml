@@ -1,0 +1,17 @@
+services:
+  control-plane:
+    build:
+      context: .
+      dockerfile: control-plane/Dockerfile
+    environment:
+      - CP_BOOTSTRAP_TOKEN=${CP_BOOTSTRAP_TOKEN:-changeme}
+      - CP_DB_PATH=/data/kokoa.db
+      - CP_LISTEN_ADDR=:8080
+    ports:
+      - "8080:8080"
+    volumes:
+      - cp-data:/data
+    restart: unless-stopped
+
+volumes:
+  cp-data: {}
