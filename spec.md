@@ -36,6 +36,108 @@
 
 ---
 
+## 検討したソリューション
+
+### 1. Pangolin
+**概要**: セルフホスト可能なトンネル型リバースプロキシ
+
+**特徴**:
+- Traefik + WireGuardベース
+- Web UIによる管理
+- SSO、2FA対応
+
+**制限**:
+- ❌ 完全セルフホストで複数ノードの自動フェイルオーバーは不可
+- Remote Node機能にはPangolin Cloudのコントロールプレーンが必要
+
+**結論**: 要件を満たさない
+
+---
+
+
+### 2. Firezone
+**概要**: WireGuardベースのゼロトラストVPN
+
+**特徴**:
+- 複数Gatewayによる自動フェイルオーバー・ロードバランシング
+- エンタープライズグレードの機能
+
+**制限**:
+- ⚠️ セルフホストは可能だが、公式サポート外
+- 内部APIが急速に変化しており、本番環境での使用は推奨されない
+
+**結論**: 現時点では不安定
+
+---
+
+
+### 3. Wiredoor
+**概要**: セルフホストIngress-as-a-Serviceプラットフォーム
+
+**特徴**:
+- WireGuard + NGINXベース
+- Gateway Node対応
+- Kubernetes統合
+- Apache-2.0ライセンス
+
+**制限**:
+- ⚠️ DNS自動フェイルオーバーは自分で実装が必要
+- ⚠️ VPS自動作成・破棄機能は含まれていない
+
+**結論**: 使用可能だが、DNS統合とVPS管理の自動化を追加実装する必要あり
+
+---
+
+
+### 4. Netmaker
+**概要**: WireGuardベースのメッシュネットワークプラットフォーム
+
+**特徴**:
+- ロードバランシング・フェイルオーバー機能
+- 複数のRemote Access Gateway展開可能
+- カーネルWireGuardで高速
+
+**制限**:
+- ❌ Failover機能はProfessional Edition（有料）のみ
+- Community Editionでは自動フェイルオーバー不可
+
+**結論**: 有料版なら要件を満たす、無料版は不十分
+
+---
+
+
+### 5. NetBird
+**概要**: Tailscaleのセルフホスト代替
+
+**特徴**:
+- 完全セルフホスト可能
+- アイデンティティ管理統合
+- 使いやすいWeb UI
+
+**制限**:
+- 複数リレーサーバーの構成が文書化されていない
+- 入口ノード管理には不向き
+
+**結論**: メッシュVPNとしては優秀だが、今回の用途には適さない
+
+---
+
+
+### 6. Headscale
+**概要**: Tailscaleのコントロールサーバーのオープンソース実装
+
+**特徴**:
+- 完全セルフホスト
+- Tailscaleクライアントと互換性
+
+**制限**:
+- フェイルオーバーは手動実装が必要
+- 入口ノード管理機能なし
+
+**結論**: ベースとして使えるが、追加実装が必要
+
+---
+
 ## 推奨ソリューション: 3層アーキテクチャ
 
 ### アーキテクチャ図
@@ -45,8 +147,8 @@
     ↓ DNS (GeoDNS/Round Robin for app.hoge.com, wiki.fuga.com)
     
 【Layer 1: 使い捨て入口ノード (VPS)】
-[VPS #1 - Nginx + WireGuard Client + Kokoa Agent] ← メイン
-[VPS #2 - Nginx + WireGuard Client + Kokoa Agent] ← フェイルオーバー
+[VPS #1 - Nginx + WireGuard Client + Kokoa Agent]
+[VPS #2 - Nginx + WireGuard Client + Kokoa Agent]
 
     ↓ WireGuardトンネル (暗号化)
     
@@ -167,5 +269,3 @@ for HOST in "${HOSTNAMES_FROM_CP[@]}"; do
 done
 ```
 
----
-（以降のセクションは、このマルチドメイン対応の思想に準じます）
