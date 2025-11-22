@@ -28,7 +28,7 @@
 
 ## 2. プロジェクトの土台作り（Control Plane）
 
-### 2.1. ディレクトリ構造（変更なし）
+### 2.1. ディレクトリ構造
 Goを想定した基本的なディレクトリ構造。
 
 ```
@@ -48,15 +48,14 @@ Goを想定した基本的なディレクトリ構造。
 └── docker-compose.yml
 ```
 
-### 2.2. 初期セットアップ（変更なし）
+### 2.2. 初期セットアップ
 - `go mod init` を実行し、基本的なWebサーバーを実装。
 
 ---
 
 ## 3. Control Plane - コア機能
 
-### 3.1. 最小DBスキーマ (更新)
-
+### 3.1. 最小DBスキーマ
 ```sql
 -- オリジンサーバー（単なるWireGuardピア）
 CREATE TABLE IF NOT EXISTS origins (
@@ -87,14 +86,14 @@ CREATE TABLE IF NOT EXISTS edge_nodes (
 );
 ```
 
-### 3.2. 最小APIエンドポイント (更新)
+### 3.2. 最小APIエンドポイント
 
 - **`POST /api/v1/origins`**: Originを登録（`domain`フィールドは不要に）。
 - **`POST /api/v1/routes`**: ホスト名、Origin、転送先ポートを紐付けるルートを作成。
 - **`POST /api/v1/edge-nodes/register`**: Edge Nodeが初回起動時に自身を登録し、永続的な認証トークンを取得。
 - **`GET /api/v1/edge-nodes/me/config`**: Edge Nodeが認証トークンを使い、自身の動的な設定（Nginxの`map`情報、ホスト名リスト）を取得。
 
-### 3.3. 最小Web UI (更新)
+### 3.3. 最小Web UI
 
 - Origin登録フォーム（名前のみ）。
 - Route登録フォーム（ホスト名、Origin選択、ポート番号）。
@@ -102,7 +101,7 @@ CREATE TABLE IF NOT EXISTS edge_nodes (
 
 ---
 
-## 4. 設定ファイルの自動生成 (更新)
+## 4. 設定ファイルの自動生成
 
 ### 4.1. Nginx `map` 設定生成 (`generator/nginx.go`)
 
