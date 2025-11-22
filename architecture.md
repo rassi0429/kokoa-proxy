@@ -2305,7 +2305,7 @@ limit_conn addr 10;
 Origin A (10.0.0.1) ←→ Origin B (10.0.0.2)  # 直接通信可能！
 ```
 
-**解決策1: 各Originごとに独立したネットワーク（推奨）**
+**解決策: 各Originごとに独立したネットワーク（推奨）**
 
 各Originに専用のサブネットを割り当て、完全に分離します。
 
@@ -2420,53 +2420,6 @@ server {
         proxy_pass http://origin_b;
     }
 }
-```
-
----
-
-**解決策2: AllowedIPsで厳密に制限**
-
-同じネットワーク（10.0.0.0/24）でも、AllowedIPsで制限。
-
-```bash
-# Origin A (/etc/wireguard/wg0.conf)
-[Interface]
-Address = 10.0.0.1/24
-
-# Edge Node 1からのトラフィックのみ許可
-[Peer]
-PublicKey = <edge_node_1_public_key>
-AllowedIPs = 10.0.0.10/32  # Origin Bの10.0.0.2は含まれない
-
-# Edge Node 2からのトラフィックのみ許可
-[Peer]
-PublicKey = <edge_node_2_public_key>
-AllowedIPs = 10.0.0.11/32
-```
-
-**iptablesで追加制御:**
-```bash
-# Origin A側で、他のOriginへの通信をブロック
-iptables -A OUTPUT -d 10.0.0.2/32 -j DROP  # Origin Bへの通信を拒否
-iptables -A OUTPUT -d 10.0.0.3/32 -j DROP  # Origin Cへの通信を拒否
-```
-
-**⚠️ 注意:**
-この方法は設定ミスのリスクがあるため、**解決策1（独立ネットワーク）を強く推奨**。
-
----
-
-**解決策3: WireGuard以外の分離手段**
-
-より複雑ですが、完全分離を保証：
-
-```
-各Originが個別のWireGuardサーバーを持ち、
-Edge Nodeが複数のWireGuardクライアントを動かす。
-
-Origin A ←→ wg0 ←→ Edge Node
-Origin B ←→ wg1 ←→ Edge Node
-Origin C ←→ wg2 ←→ Edge Node
 ```
 
 ---
@@ -3423,27 +3376,4 @@ resp, err := http.Post(
         },
     }),
 )
-```
-
----
-
-## 次のステップ
-
-1. **技術スタック決定**
-   - バックエンド言語: Go / Python / Node.js?
-   - フロントエンド: React / Vue / Svelte?
-   - DB: PostgreSQL / SQLite?
-
-2. **プロトタイプ実装**
-   - Phase 1のMVPから開始
-   - Control Planeの基本機能
-   - WireGuard設定生成
-
-3. **テスト環境構築**
-   - Control Plane: ローカル or 小型VPS
-   - Edge Node: Oracle Free Tier × 2
-   - Origin: ローカルDocker
-
-どの部分から実装を始めますか?
-
 ```
