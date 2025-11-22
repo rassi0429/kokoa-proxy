@@ -188,3 +188,41 @@ echo "* * * * * root /opt/kokoa/poll_config.sh" > /etc/cron.d/kokoa-edge-agent
 /opt/kokoa/poll_config.sh
 ```
 *`install-origin.sh`は前回定義から大きな変更はありません。*
+
+---
+
+## 8. ホストのセットアップ (MVP)
+
+MVP段階では、以下の3種類のホストを手動で準備することを想定します。
+
+### 8.1. Control Plane ホスト
+
+- **役割**: Kokoa Proxyの管理機能全体を実行するサーバー。
+- **要件**:
+    - **マシン**: 1台のVPSまたは自宅サーバー。
+    - **OS**: Linux (Ubuntu 22.04 LTS推奨)。
+    - **ソフトウェア**: DockerおよびDocker Compose。
+    - **ネットワーク**:
+        - 管理者からのWeb UIアクセスと、Edge/OriginノードからのAPIアクセス用にポートを公開（例: 80/443）。
+        - 固定IPアドレスまたはDNS名を持つこと。
+
+### 8.2. Origin ホスト
+
+- **役割**: 公開したい実際のWebアプリケーションが動作しているサーバー。
+- **要件**:
+    - **マシン**: 自宅ネットワークやプライベートクラウド内の任意のサーバー/VM/PC。
+    - **OS**: `systemd`と`wireguard`ツールが動作する標準的なLinux。
+    - **ネットワーク**: インターネットへのアウトバウンド接続が可能であること（インバウンドポート開放は不要）。
+    - **セットアップ**: Control PlaneのWeb UIからOriginを登録後、提供される設定ファイル（`origin-config.tar.gz`と`install-origin.sh`）をOriginホストにコピーし、`install-origin.sh`を実行することでセットアップします。これによりWireGuardが設定され、Control Planeとの接続が開始されます。
+
+### 8.3. Edge Node ホスト
+
+- **役割**: インターネットからのトラフィックを受け付ける公開エンドポイント。
+- **要件**:
+    - **マシン**: 1台のクリーンなVPS（DigitalOcean, Vultr, Hetznerなど）。
+    - **OS**: Ubuntu 22.04 LTS推奨。
+    - **ソフトウェア**: `install-edge.sh`スクリプトによって `wireguard`, `nginx`, `certbot`, `jq` が自動的にインストールされます。
+    - **ネットワーク**:
+        - グローバルな固定IPアドレスを持つこと。
+        - ポート `80` と `443` がインターネットからアクセス可能であること。
+    - **セットアップ**: `install-edge.sh`スクリプトを実行してセットアップします。
